@@ -1,0 +1,154 @@
+---
+title: "Exploration of NFHS death file"
+author: Casey Breen
+---
+
+
+## Read in data 
+
+
+```{r}
+library(tidyverse)
+library(haven)
+library(cowplot)
+```
+
+```{r}
+death_file <- read_dta("~/Downloads/nfhs5_deaths.DTA")
+```
+
+
+— Each row corresponds to a death 
+— Each column corresponds to a variable
+
+
+```{r}
+## death registration 
+## 1 = registered and 0 = not registered
+death_file %>% 
+  count(sh91_)
+```
+
+## relationship between death age and registration status
+
+```{r}
+death_file %>% 
+  count(death_age, female)
+```
+## geography 
+
+state - hv024
+district - shdist
+
+```{r}
+death_registration_by_district <- death_file %>% 
+  group_by(shdist) %>% 
+  summarize(mean_death_registration = mean(sh91_))
+  
+  death_registration_by_district %>% 
+    ggplot() + 
+    geom_histogram(aes(x = mean_death_registration), color = "black", fill = "grey") + 
+    cowplot::theme_cowplot()
+  
+```
+
+```{r}
+death_file %>% 
+  mutate(female_recode = case_when(
+    female == 1 ~ "women",
+    TRUE ~ "men"
+  )) %>%
+  group_by(death_age, female_recode) %>% 
+  summarize(registered = mean(sh91_),
+            se = sd(sh91_) / sqrt(n()-1)) %>% 
+  ggplot(aes(x = death_age, y = registered, color = female_recode,
+             ymin = registered - 1.96 * se, 
+             ymax = registered + 1.96 * se, 
+             )) +
+  geom_pointrange() + 
+  geom_line() + 
+  ggsci::scale_color_lancet() +
+  theme_cowplot() + 
+  ylim(0, 1)
+
+
+death_file %>% 
+  group_by(female) %>% 
+  summarize(mean(sh91_))
+```
+
+```{r}
+death_file %>% 
+  group_by(wealth_quantile = hv270) %>% 
+  summarize(registration = mean(sh91_)) %>% 
+  ggplot(aes(x = wealth_quantile, y = registration)) + 
+  geom_col(fill = "grey", color = "black") + 
+  geom_text(aes(label = round(registration, 2)), vjust = -0.5) + 
+  theme_cowplot()
+```
+
+```{r}
+death_file %>% 
+  mutate(rural = case_when(
+    hv025 == 2 ~ "rural",
+    TRUE ~ "urban"
+  )) %>%
+  group_by(wealth_quantile = hv270, rural) %>% 
+  summarize(registration = mean(sh91_)) %>% 
+  ggplot(aes(x = wealth_quantile, y = registration, fill = rural)) + 
+  geom_col(position = position_dodge(width = 0.9), color = "black") + 
+  geom_text(aes(label = round(registration, 2)), position = position_dodge(width = 0.9), vjust = -0.5) +
+  theme_cowplot()
+
+```
+
+Other predictors: 
+
+— Presence of educated family member
+— Household size 
+— Geospatial stuff
+— Length of period between death and interview (months)
+— Caste 
+— Native language 
+— Number of children under 5
+— Marital status 
+— Mode of transport 
+— Exposure to media and literacy 
+— Household member disability 
+— District level covariates - district wealth, district mortality, education, etc. etc. 
+— Variables for health care access 
+— Digital variables - internet access, mobile phone access, etc. 
+
+
+```{r}
+summary(model)
+```
+
+
+```{r}
+set.seed(123)  # Setting seed for reproducibility
+
+# Create a random split indicator
+split <- sample(1:nrow(death_file), size = 0.7 * nrow(death_file))
+
+# Split the data into training and test sets
+training_sample <- death_file[split, ]
+test_sample <- death_file[-split, ]
+```
+
+
+```{r}
+model <- glm(sh91_ ~ death_age + female + as.factor(hv270) + as.factor(hv025) + as.factor(hv024), data = training_sample, family = "binomial")
+
+predict(model, newdata = test_sample, type = "response")
+
+test_sample %>% 
+  mutate(prediction = predict(model, newdata = test_sample, type = "response")) %>% 
+  mutate(prediction_binary = case_when(
+    prediction > 0.5 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  count(sh91_, prediction_binary)
+```
+
+
