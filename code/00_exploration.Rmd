@@ -8,99 +8,169 @@ author: Casey Breen
 
 
 ```{r}
+## library packages 
 library(tidyverse)
 library(haven)
 library(cowplot)
+library(here)
+
+
+## read in death file 
+death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA"))
 ```
 
-```{r}
-death_file <- read_dta("~/Downloads/nfhs5_deaths.DTA")
-```
+
+## clean up variables 
+
+- Each row corresponds to a death 
+- Each column corresponds to a variable
 
 
-— Each row corresponds to a death 
-— Each column corresponds to a variable
+variable definitions to recode: 
 
+- hv024 = state of household (new var, state)
+- shdist = district of household (new var, district)
+- sh91_ = death_registration (new var, registered)
+- hv001 = cluster number 
+- hv005 = household weight 
+
+other key variables (not recodes)
+
+- death age = age of death 
+- female = female gender 
 
 ```{r}
 ## death registration 
 ## 1 = registered and 0 = not registered
-death_file %>% 
-  count(sh91_)
+death_file <- death_file %>% 
+  mutate(registered = case_when(
+    sh91_ == 1 ~ "registered",
+    sh91_ == 0 ~ "not registered"
+  )) %>% 
+  ## recode gender 
+  mutate(gender = case_when(
+    female == 1 ~ "women",
+    TRUE ~ "men"
+  )) %>% 
+  ## rename variables 
+  rename(
+    state = hv024,
+    district = shdist, 
+    wealth_quantile =  hv270,
+    rural_urban  = hv025,
+    registered_dummy = sh91_
+  )
+
 ```
 
-## relationship between death age and registration status
-
-```{r}
-death_file %>% 
-  count(death_age, female)
-```
 ## geography 
 
-state - hv024
-district - shdist
+
 
 ```{r}
+## death registration by district 
 death_registration_by_district <- death_file %>% 
-  group_by(shdist) %>% 
-  summarize(mean_death_registration = mean(sh91_))
+  group_by(district) %>% 
+  summarize(mean_death_registration = mean(registered_dummy))
   
-  death_registration_by_district %>% 
-    ggplot() + 
-    geom_histogram(aes(x = mean_death_registration), color = "black", fill = "grey") + 
-    cowplot::theme_cowplot()
-  
+district_plot <- death_registration_by_district %>% 
+  ggplot() + 
+  geom_histogram(aes(x = mean_death_registration), color = "black", fill = "grey") + 
+  cowplot::theme_cowplot() + 
+  labs(x = "Deaths Registered (%)", y = "Number of Districts") + 
+  scale_x_continuous(labels = scales::percent_format())
 ```
 
+
 ```{r}
-death_file %>% 
+# Define burnt orange color
+burnt_orange <- "#CC5500"
+
+# Calculating mean death registration and standard error by state
+death_registration_by_state <- death_file %>% 
+  group_by(state) %>% 
+  summarize(mean_death_registration = mean(registered_dummy),
+            se_death_registration = sd(registered_dummy) / sqrt(n())) %>% 
+  mutate(state = as_factor(state))
+
+# Plotting with geom_linerange for 80% and 90% CI and geom_pointrange for 95% CI
+state_plot <- death_registration_by_state %>% 
+  ggplot() +
+  # 90% CI (z = 1.645)
+  geom_linerange(aes(x = mean_death_registration, 
+                     y = reorder(state, mean_death_registration),
+                     xmin = mean_death_registration - 1.645 * se_death_registration,
+                     xmax = mean_death_registration + 1.645 * se_death_registration), 
+                 color = burnt_orange, size = 1) +
+
+  # 95% CI (z = 1.96)
+  geom_pointrange(aes(x = mean_death_registration, 
+                      y = reorder(state, mean_death_registration),
+                      xmin = mean_death_registration - 1.96 * se_death_registration,
+                      xmax = mean_death_registration + 1.96 * se_death_registration), 
+                  color = burnt_orange, fill = burnt_orange, size = 1.5, fatten = 2.5) + #,  
+  
+  # Custom theme and labels
+  cowplot::theme_cowplot() + 
+  labs(x = "Deaths Registered (%)",
+       y = "State") + 
+  scale_x_continuous(labels = scales::percent_format(), limits = c(0, 1))
+```
+
+
+```{r}
+age_plot <- death_file %>% 
   mutate(female_recode = case_when(
     female == 1 ~ "women",
     TRUE ~ "men"
   )) %>%
   group_by(death_age, female_recode) %>% 
-  summarize(registered = mean(sh91_),
-            se = sd(sh91_) / sqrt(n()-1)) %>% 
+  summarize(registered = mean(registered_dummy),
+            se = sd(registered_dummy) / sqrt(n()-1)) %>% 
   ggplot(aes(x = death_age, y = registered, color = female_recode,
              ymin = registered - 1.96 * se, 
              ymax = registered + 1.96 * se, 
              )) +
-  geom_pointrange() + 
+  geom_pointrange(position = position_dodge(width = 0.4)) + 
   geom_line() + 
   ggsci::scale_color_lancet() +
   theme_cowplot() + 
-  ylim(0, 1)
-
-
-death_file %>% 
-  group_by(female) %>% 
-  summarize(mean(sh91_))
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +
+  theme(legend.position = "bottom") + 
+  labs(x = "Age of Death",
+       y = "Death Registration (%)") + 
+  guides(color = guide_legend(title = NULL))
 ```
 
 ```{r}
-death_file %>% 
-  group_by(wealth_quantile = hv270) %>% 
-  summarize(registration = mean(sh91_)) %>% 
-  ggplot(aes(x = wealth_quantile, y = registration)) + 
-  geom_col(fill = "grey", color = "black") + 
-  geom_text(aes(label = round(registration, 2)), vjust = -0.5) + 
-  theme_cowplot()
-```
-
-```{r}
-death_file %>% 
-  mutate(rural = case_when(
-    hv025 == 2 ~ "rural",
+urban_plot <- death_file %>% 
+  mutate(rural_urban = case_when(
+    rural_urban == 2 ~ "rural",
     TRUE ~ "urban"
   )) %>%
-  group_by(wealth_quantile = hv270, rural) %>% 
-  summarize(registration = mean(sh91_)) %>% 
-  ggplot(aes(x = wealth_quantile, y = registration, fill = rural)) + 
-  geom_col(position = position_dodge(width = 0.9), color = "black") + 
-  geom_text(aes(label = round(registration, 2)), position = position_dodge(width = 0.9), vjust = -0.5) +
-  theme_cowplot()
-
+  group_by(wealth_quantile, gender, rural_urban) %>% 
+  summarize(registration = mean(registered_dummy)) %>% 
+  ggplot(aes(x = wealth_quantile, y = registration)) + 
+  geom_col(aes(fill = gender), color = "black", position = position_dodge2(1), alpha = 0.5) + 
+  geom_text(aes(label = paste0(round(registration, 2)* 100, "%")), vjust = -0.5, position = position_dodge2(1)) + 
+  ggsci::scale_fill_lancet() +
+  theme_cowplot() + 
+  scale_y_continuous(labels = scales::percent_format()) +
+  theme(legend.position = "bottom") + 
+  labs(x = "Wealth Quantile",
+       y = "Death Registration (%)") + 
+  facet_wrap(~rural_urban)
+  
 ```
+
+```{r}
+plot_left <- cowplot::plot_grid(district_plot, urban_plot, age_plot, labels = "AUTO", cols = 1) 
+
+full_plot <- cowplot::plot_grid(plot_left, state_plot, labels = c("", "D"), cols = 2, rel_widths = c(1.3, 1))
+
+ggsave(full_plot, filename = here("figures", "death_registration.png"), width = 14, height = 14)
+```
+
 
 Other predictors: 
 
