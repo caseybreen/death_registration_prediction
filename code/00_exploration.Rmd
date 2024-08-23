@@ -106,7 +106,7 @@ burnt_orange <- "#CC5500"
 
 # Calculating mean death registration and standard error by state
 death_registration_by_state_new <- death_survey %>% 
-  group_by(state) %>% 
+  group_by(state, gender) %>% 
   summarize(mean_death_registration = survey_mean(registered_dummy, vartype = "se")) %>% 
       mutate(state = as_factor(state)) %>% 
   mutate(state = case_when(
@@ -120,21 +120,24 @@ state_plot <- death_registration_by_state_new %>%
   geom_linerange(aes(x = mean_death_registration, 
                      y = reorder(state, mean_death_registration),
                      xmin = mean_death_registration - 1.645 * mean_death_registration_se,
-                     xmax = mean_death_registration + 1.645 * mean_death_registration_se), 
-                 color = burnt_orange, size = 1) +
+                     xmax = mean_death_registration + 1.645 * mean_death_registration_se,
+                     color = gender), 
+                 size = 1) +
 
   # 95% CI (z = 1.96)
   geom_pointrange(aes(x = mean_death_registration, 
                       y = reorder(state, mean_death_registration),
                       xmin = mean_death_registration - 1.96 * mean_death_registration_se,
-                      xmax = mean_death_registration + 1.96 * mean_death_registration_se), 
-                  color = burnt_orange, fill = burnt_orange, size = 1.5, fatten = 2.5) + #,  
+                      xmax = mean_death_registration + 1.96 * mean_death_registration_se, color = gender), 
+                  , fill = burnt_orange, size = 1.5, fatten = 2.5) + #,  
   
   # Custom theme and labels
   cowplot::theme_cowplot() + 
+  ggsci::scale_color_lancet() +
   labs(x = "Deaths Registered (%)",
        y = "State") + 
-  scale_x_continuous(labels = scales::percent_format(), limits = c(0, 1))
+  scale_x_continuous(labels = scales::percent_format(), limits = c(0, 1)) + 
+  theme(legend.position = "bottom") 
 ```
 
 
