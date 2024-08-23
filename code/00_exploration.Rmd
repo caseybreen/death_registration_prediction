@@ -13,6 +13,7 @@ library(tidyverse)
 library(haven)
 library(cowplot)
 library(here)
+library(srvyr)
 
 
 ## read in death file 
@@ -33,11 +34,20 @@ variable definitions to recode:
 - sh91_ = death_registration (new var, registered)
 - hv001 = cluster number 
 - hv005 = household weight 
+- hv009 = number of household members
 
 other key variables (not recodes)
 
 - death age = age of death 
 - female = female gender 
+- native_language = native language 
+- altitude_quintile = altitude quintile 
+- pregnancy_death = pregnancy related death 
+- external_death = external cause of death
+- month_since_death = months since death
+- caste_religion = caste religion 
+- highest_education = highest education of household member 
+- working_members = working age household members 
 
 ```{r}
 ## death registration 
@@ -53,9 +63,7 @@ death_file <- death_file %>%
     TRUE ~ "men"
   )) %>% 
   ## rename variables 
-  rename(
-    state = hv024,
-    district = shdist, 
+  mutate(
     wealth_quantile =  hv270,
     rural_urban  = hv025,
     registered_dummy = sh91_
@@ -63,22 +71,32 @@ death_file <- death_file %>%
 
 ```
 
+
+```{r}
+## read in sryvr package 
+death_survey <- death_file %>%
+  as_survey_design(weights = hv005, ids = hv001)
+```
+
+
 ## geography 
-
-
 
 ```{r}
 ## death registration by district 
-death_registration_by_district <- death_file %>% 
-  group_by(district) %>% 
-  summarize(mean_death_registration = mean(registered_dummy))
-  
+death_registration_by_district <- death_survey %>% 
+  group_by(district, gender) %>% 
+  summarize(mean_death_registration = survey_mean(registered_dummy, vartype = "se"))
+
+# Create the distribution plot
 district_plot <- death_registration_by_district %>% 
-  ggplot() + 
-  geom_histogram(aes(x = mean_death_registration), color = "black", fill = "grey") + 
+  ggplot(aes(x = mean_death_registration, color = gender, fill = gender)) + 
+  geom_density(aes(y = after_stat(count) / sum(after_stat(count))), alpha = 0.2) +  # Adjust allows for smoothing
   cowplot::theme_cowplot() + 
-  labs(x = "Deaths Registered (%)", y = "Number of Districts") + 
-  scale_x_continuous(labels = scales::percent_format())
+  labs(x = "Deaths Registered (%)", y = "Proportion", color = "Gender", fill = "Gender") + 
+  scale_x_continuous(labels = scales::percent_format()) +
+  ggsci::scale_fill_lancet() +
+  ggsci::scale_color_lancet() + 
+  theme(legend.position = "bottom")
 ```
 
 
@@ -87,27 +105,29 @@ district_plot <- death_registration_by_district %>%
 burnt_orange <- "#CC5500"
 
 # Calculating mean death registration and standard error by state
-death_registration_by_state <- death_file %>% 
+death_registration_by_state_new <- death_survey %>% 
   group_by(state) %>% 
-  summarize(mean_death_registration = mean(registered_dummy),
-            se_death_registration = sd(registered_dummy) / sqrt(n())) %>% 
-  mutate(state = as_factor(state))
+  summarize(mean_death_registration = survey_mean(registered_dummy, vartype = "se")) %>% 
+      mutate(state = as_factor(state)) %>% 
+  mutate(state = case_when(
+    state == "dadra & nagar haveli and daman & diu" ~ "DNH & DD",
+    TRUE ~ state))
 
 # Plotting with geom_linerange for 80% and 90% CI and geom_pointrange for 95% CI
-state_plot <- death_registration_by_state %>% 
+state_plot <- death_registration_by_state_new %>% 
   ggplot() +
   # 90% CI (z = 1.645)
   geom_linerange(aes(x = mean_death_registration, 
                      y = reorder(state, mean_death_registration),
-                     xmin = mean_death_registration - 1.645 * se_death_registration,
-                     xmax = mean_death_registration + 1.645 * se_death_registration), 
+                     xmin = mean_death_registration - 1.645 * mean_death_registration_se,
+                     xmax = mean_death_registration + 1.645 * mean_death_registration_se), 
                  color = burnt_orange, size = 1) +
 
   # 95% CI (z = 1.96)
   geom_pointrange(aes(x = mean_death_registration, 
                       y = reorder(state, mean_death_registration),
-                      xmin = mean_death_registration - 1.96 * se_death_registration,
-                      xmax = mean_death_registration + 1.96 * se_death_registration), 
+                      xmin = mean_death_registration - 1.96 * mean_death_registration_se,
+                      xmax = mean_death_registration + 1.96 * mean_death_registration_se), 
                   color = burnt_orange, fill = burnt_orange, size = 1.5, fatten = 2.5) + #,  
   
   # Custom theme and labels
@@ -119,46 +139,50 @@ state_plot <- death_registration_by_state %>%
 
 
 ```{r}
-age_plot <- death_file %>% 
-  mutate(female_recode = case_when(
-    female == 1 ~ "women",
-    TRUE ~ "men"
-  )) %>%
-  group_by(death_age, female_recode) %>% 
-  summarize(registered = mean(registered_dummy),
-            se = sd(registered_dummy) / sqrt(n()-1)) %>% 
-  ggplot(aes(x = death_age, y = registered, color = female_recode,
-             ymin = registered - 1.96 * se, 
-             ymax = registered + 1.96 * se, 
-             )) +
+age_plot <- death_survey %>% 
+  mutate(
+    female_recode = case_when(
+      female == 1 ~ "women",
+      TRUE ~ "men"
+    ),
+    # Create 5-year age groups
+    age_group = cut(death_age, breaks = seq(0, max(death_age, na.rm = TRUE), by = 5), right = FALSE, include.lowest = TRUE)
+  ) %>%
+  group_by(age_group, female_recode) %>% 
+  summarize(registered_mean = survey_mean(registered_dummy, vartype = "se")) %>% 
+  ggplot(aes(x = age_group, y = registered_mean, color = female_recode,
+             ymin = registered_mean - 1.96 * registered_mean_se, 
+             ymax = registered_mean + 1.96 * registered_mean_se)) +
   geom_pointrange(position = position_dodge(width = 0.4)) + 
-  geom_line() + 
+  geom_line(position = position_dodge(width = 0.4)) + 
   ggsci::scale_color_lancet() +
   theme_cowplot() + 
   scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +
-  theme(legend.position = "bottom") + 
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(angle = 45, hjust = 1)) + # Rotating the x-axis labels
   labs(x = "Age of Death",
-       y = "Death Registration (%)") + 
+       y = "Death Registration") + 
   guides(color = guide_legend(title = NULL))
+
 ```
 
 ```{r}
-urban_plot <- death_file %>% 
+urban_plot <- death_survey %>% 
   mutate(rural_urban = case_when(
     rural_urban == 2 ~ "rural",
     TRUE ~ "urban"
   )) %>%
   group_by(wealth_quantile, gender, rural_urban) %>% 
-  summarize(registration = mean(registered_dummy)) %>% 
-  ggplot(aes(x = wealth_quantile, y = registration)) + 
-  geom_col(aes(fill = gender), color = "black", position = position_dodge2(1), alpha = 0.5) + 
-  geom_text(aes(label = paste0(round(registration, 2)* 100, "%")), vjust = -0.5, position = position_dodge2(1)) + 
+  summarize(registered_mean = survey_mean(registered_dummy, vartype = "se")) %>% 
+  ggplot(aes(x = wealth_quantile, y = registered_mean)) + 
+  geom_col(aes(fill = gender), color = "black", position = position_dodge2(width = 1, padding = 0.2), alpha = 0.5) + 
+  geom_text(aes(label = paste0(round(registered_mean, 2)* 100, "%")), vjust = -0.8, hjust = .4, position = position_dodge2(width = 1, padding = 0.2)) + 
   ggsci::scale_fill_lancet() +
   theme_cowplot() + 
-  scale_y_continuous(labels = scales::percent_format()) +
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +
   theme(legend.position = "bottom") + 
   labs(x = "Wealth Quantile",
-       y = "Death Registration (%)") + 
+       y = "Death Registration") + 
   facet_wrap(~rural_urban)
   
 ```
@@ -168,7 +192,7 @@ plot_left <- cowplot::plot_grid(district_plot, urban_plot, age_plot, labels = "A
 
 full_plot <- cowplot::plot_grid(plot_left, state_plot, labels = c("", "D"), cols = 2, rel_widths = c(1.3, 1))
 
-ggsave(full_plot, filename = here("figures", "death_registration.png"), width = 14, height = 14)
+ggsave(full_plot, filename = here("figures", "death_registration.png"), width = 14, height = 10, bg = "white")
 ```
 
 
@@ -221,4 +245,18 @@ test_sample %>%
   count(sh91_, prediction_binary)
 ```
 
+
+
+
+```{r}
+death_file %>% 
+  filter(months_since_death > 0 & months_since_death < 48) %>%
+  group_by(months_since_death) %>% 
+  summarize(prop_registered = mean(registered_dummy)) %>% 
+  ggplot(aes(x = months_since_death, y = prop_registered)) + 
+  geom_point() + 
+  geom_line() + 
+  theme_cowplot() +
+  ylim(0, 1)
+```
 
