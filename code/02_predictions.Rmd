@@ -1,0 +1,264 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Other predictors: 
+
+— Presence of educated family member
+— Household size 
+— Geospatial stuff
+— Length of period between death and interview (months)
+— Caste 
+— Native language 
+— Number of children under 5
+— Marital status 
+— Mode of transport 
+— Exposure to media and literacy 
+— Household member disability 
+— District level covariates - district wealth, district mortality, education, etc. etc. 
+— Variables for health care access 
+— Digital variables - internet access, mobile phone access, etc. 
+
+
+## notes for aashish 
+
+- missing in household and missing in 
+
+
+```{r}
+## library packages 
+library(tidyverse)
+library(haven)
+library(cowplot)
+library(here)
+library(srvyr)
+library(sl3)
+library(tictoc)
+
+
+## read in death file 
+death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA")) %>% 
+  filter(months_since_death > 6)
+```
+
+
+## create some new features 
+
+```{r}
+death_file <- death_file %>% 
+  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
+  mutate(road_length_km_quantile = ntile(road_length_km, n = 5))
+  
+
+death_file <- death_file %>% 
+  filter(!is.na(area_km2))
+```
+
+
+
+```{r}
+death_file %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>% 
+  pivot_longer(-1) %>%
+  arrange(desc(value))
+```
+
+
+
+
+```{r}
+colnames(death_file)
+```
+
+
+```{r}
+set.seed(123)  # Setting seed for reproducibility
+
+# Create a random split indicator
+split <- sample(1:nrow(death_file), size = 0.7 * nrow(death_file))
+
+# Split the data into training and test sets
+training_sample <- death_file[split, ]
+test_sample <- death_file[-split, ]
+```
+
+## baseline model 
+
+```{r}
+## baseline model 
+model <- glm(registered ~ death_age + female + as.factor(wealth_quintile) + as.factor(native_language) + as.factor(internet) + highest_education + as.factor(health_insurance) + as.factor(rural) + as.factor(state) + own_land + cycle + external_death + female_head + as.factor(altitude_quintile), data = training_sample, family = "binomial")
+
+predict(model, newdata = test_sample, type = "response")
+
+test_sample %>% 
+  mutate(prediction = predict(model, newdata = test_sample, type = "response")) %>% 
+  mutate(prediction_binary = case_when(
+    prediction > 0.5 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  count(registered, prediction_binary) %>% 
+  mutate(prop = n / sum(n))
+```
+
+
+
+
+```{r}
+options(sl3.verbose = TRUE)
+
+# Define the outcome and covariates
+outcome <- "registered"
+covariates <- c("death_age", "female", "wealth_quintile", "native_language", "internet",
+                "highest_education", "health_insurance", "rural", "state", "own_land", 
+                "cycle", "external_death", "female_head", "altitude_quintile", "facility_distance_quantile", "road_length_km_quantile")
+
+
+task <- make_sl3_Task(data = training_sample %>% sample_n(10000), covariates = covariates, outcome = outcome, outcome_type = "binomial")
+
+```
+
+
+```{r}
+# Define base learners
+lrn_glm <- Lrnr_glm$new()
+lrn_rf <- Lrnr_ranger$new()  # Random forest learner
+lrn_gbm <- Lrnr_gbm$new()    # Gradient boosting machine learner
+
+# Combine learners into a learner stack
+learner_stack <- sl3::Stack$new(lrn_glm, lrn_rf, lrn_gbm)
+
+```
+
+
+
+```{r}
+# Define the metalearner
+metalearner <- Lrnr_nnls$new()  # Non-negative least squares (NNLS) metalearner
+
+# Create the Super Learnerx
+super_learner <- Lrnr_sl$new(learners = learner_stack, metalearner = metalearner, verbose = T)
+```
+
+```{r}
+tic()
+fit <- super_learner$train(task)
+toc()
+```
+
+
+```{r}
+# Create a task for the test sample
+test_task <- make_sl3_Task(data = test_sample, covariates = covariates, outcome = outcome, outcome_type = "binomial",)
+
+# Make predictions
+predictions <- fit$predict(test_task)
+
+# Add predictions to test sample
+test_sample <- test_sample %>%
+  mutate(prediction = predictions) %>%
+  mutate(prediction_binary = ifelse(prediction > 0.5, 1, 0))
+
+# Evaluate performance
+result <- test_sample %>%
+  count(registered, prediction_binary) %>%
+  mutate(prop = n / sum(n))
+
+print(result)
+
+```
+
+```{r}
+# Create confusion matrix
+confusion_matrix <- test_sample %>%
+  count(registered, prediction_binary) %>%
+  mutate(prop = paste0(round(n / sum(n) * 100), "%"))
+
+print(confusion_matrix)
+```
+
+
+```{r}
+# Plot with corrected code
+confusion_matrix_plot <- confusion_matrix %>% 
+  mutate(registered = case_when(
+    registered == 1 ~ "Yes", 
+    TRUE ~ "No")) %>% 
+    mutate(prediction_binary = case_when(
+    prediction_binary == 1 ~ "Yes", 
+    TRUE ~ "No")) %>% 
+  mutate(n_alt = paste0("(", n, ")")) %>% 
+ggplot(aes(x = registered, 
+           y = prediction_binary, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = prop), vjust = 1.5) +
+  geom_text(aes(label = n_alt), vjust = 3.5) +
+  scale_fill_gradient(low = "white", high = "steelblue", name = "Count") +
+  labs(y = "Predicted", x = "Observed") +
+  theme_minimal(base_size = 15) + 
+  theme(legend.position = "none")
+
+
+```
+
+
+```{r}
+disn_of_predictions <- test_sample %>%  
+  ggplot(aes(x = prediction)) + 
+  geom_histogram(binwidth = 0.01, fill = "steelblue", color = "white")+ 
+  theme_cowplot()
+```
+
+
+
+
+
+```{r}
+predicted_observed <- test_sample %>% 
+  mutate(test = cut(prediction, breaks = quantile(prediction, probs = seq(0, 1, by = .01)), include.lowest = TRUE)) %>% 
+  group_by(test) %>% 
+  summarize(
+    mean_registered = mean(registered, na.rm = TRUE),
+    count = n(),
+    mean_predictions = mean(prediction, na.rm = TRUE)
+  ) %>% 
+  ggplot(aes(x = mean_registered, y = mean_predictions)) + 
+  geom_point() +
+  geom_abline(color = "red", linetype = "dashed") + 
+  theme_cowplot() + 
+  xlim(0, 1) + 
+  ylim(0, 1) + 
+  labs(x = "Observed",
+       y = "Predicted")
+
+
+```
+
+
+```{r}
+ashb_varimp <- sl3::importance(
+  fit = fit, eval_fun = loss_squared_error, type = "permute")
+
+
+variable_importance_fig <- ashb_varimp %>% 
+  ggplot(aes(y = reorder(covariate, MSE_difference), x = MSE_difference)) +
+  geom_point() +
+  theme_cowplot() +
+  geom_segment(aes(yend = covariate, x = 0, xend = MSE_difference), linewidth = 0.5) +
+  geom_segment(aes(yend = covariate, x = 0, xend = max(MSE_difference)), linetype = "dashed", size = 0.1) +
+  labs(x = "MSE Difference",
+       y = "")
+```
+
+
+## combined figures 
+
+```{r}
+##combined figure
+prediction_combined_figure <- cowplot::plot_grid(confusion_matrix_plot, predicted_observed, disn_of_predictions, variable_importance_fig , labels = "AUTO")
+
+## predictions 
+ggsave(prediction_combined_figure, filename = here("figures", "prediction_combined_figure.png"), height = 10, width= 12, bg = "white") 
+```
+
+

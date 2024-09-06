@@ -15,7 +15,6 @@ library(cowplot)
 library(here)
 library(srvyr)
 
-
 ## read in death file 
 death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA"))
 ```
@@ -53,21 +52,15 @@ other key variables (not recodes)
 ## death registration 
 ## 1 = registered and 0 = not registered
 death_file <- death_file %>% 
-  mutate(registered = case_when(
-    sh91_ == 1 ~ "registered",
-    sh91_ == 0 ~ "not registered"
+  mutate(registered_string = case_when(
+    registered == 1 ~ "registered",
+    registered == 0 ~ "not registered"
   )) %>% 
   ## recode gender 
   mutate(gender = case_when(
     female == 1 ~ "women",
     TRUE ~ "men"
-  )) %>% 
-  ## rename variables 
-  mutate(
-    wealth_quantile =  hv270,
-    rural_urban  = hv025,
-    registered_dummy = sh91_
-  )
+  )) 
 
 ```
 
@@ -75,7 +68,7 @@ death_file <- death_file %>%
 ```{r}
 ## read in sryvr package 
 death_survey <- death_file %>%
-  as_survey_design(weights = hv005, ids = hv001)
+  as_survey_design(weights = weight, ids = cluster)
 ```
 
 
@@ -85,7 +78,7 @@ death_survey <- death_file %>%
 ## death registration by district 
 death_registration_by_district <- death_survey %>% 
   group_by(district, gender) %>% 
-  summarize(mean_death_registration = survey_mean(registered_dummy, vartype = "se"))
+  summarize(mean_death_registration = survey_mean(registered, vartype = "se"))
 
 # Create the distribution plot
 district_plot <- death_registration_by_district %>% 
@@ -107,7 +100,7 @@ burnt_orange <- "#CC5500"
 # Calculating mean death registration and standard error by state
 death_registration_by_state_new <- death_survey %>% 
   group_by(state, gender) %>% 
-  summarize(mean_death_registration = survey_mean(registered_dummy, vartype = "se")) %>% 
+  summarize(mean_death_registration = survey_mean(registered, vartype = "se")) %>% 
       mutate(state = as_factor(state)) %>% 
   mutate(state = case_when(
     state == "dadra & nagar haveli and daman & diu" ~ "DNH & DD",
@@ -116,22 +109,22 @@ death_registration_by_state_new <- death_survey %>%
 # Plotting with geom_linerange for 80% and 90% CI and geom_pointrange for 95% CI
 state_plot <- death_registration_by_state_new %>% 
   ggplot() +
-  # 90% CI (z = 1.645)
   geom_linerange(aes(x = mean_death_registration, 
                      y = reorder(state, mean_death_registration),
                      xmin = mean_death_registration - 1.645 * mean_death_registration_se,
                      xmax = mean_death_registration + 1.645 * mean_death_registration_se,
                      color = gender), 
-                 size = 1) +
-
-  # 95% CI (z = 1.96)
+                 size = 1,
+                 position = position_dodge(0.4)) +
   geom_pointrange(aes(x = mean_death_registration, 
                       y = reorder(state, mean_death_registration),
                       xmin = mean_death_registration - 1.96 * mean_death_registration_se,
-                      xmax = mean_death_registration + 1.96 * mean_death_registration_se, color = gender), 
-                  , fill = burnt_orange, size = 1.5, fatten = 2.5) + #,  
-  
-  # Custom theme and labels
+                      xmax = mean_death_registration + 1.96 * mean_death_registration_se, 
+                      color = gender), 
+                  fill = burnt_orange,
+                  size = 1.5, 
+                  fatten = 2.5,
+                  position= position_dodge(0.4)) + 
   cowplot::theme_cowplot() + 
   ggsci::scale_color_lancet() +
   labs(x = "Deaths Registered (%)",
@@ -142,7 +135,8 @@ state_plot <- death_registration_by_state_new %>%
 
 
 ```{r}
-age_plot <- death_survey %>% 
+## age plot df 
+age_plot_df <- death_survey %>% 
   mutate(
     female_recode = case_when(
       female == 1 ~ "women",
@@ -152,8 +146,10 @@ age_plot <- death_survey %>%
     age_group = cut(death_age, breaks = seq(0, max(death_age, na.rm = TRUE), by = 5), right = FALSE, include.lowest = TRUE)
   ) %>%
   group_by(age_group, female_recode) %>% 
-  summarize(registered_mean = survey_mean(registered_dummy, vartype = "se")) %>% 
-  ggplot(aes(x = age_group, y = registered_mean, color = female_recode,
+  summarize(registered_mean = survey_mean(registered, vartype = "se")) 
+  
+## age plot 
+age_plot <- ggplot(age_plot_df, aes(x = age_group, y = registered_mean, color = female_recode,
              ymin = registered_mean - 1.96 * registered_mean_se, 
              ymax = registered_mean + 1.96 * registered_mean_se)) +
   geom_pointrange(position = position_dodge(width = 0.4)) + 
@@ -171,22 +167,22 @@ age_plot <- death_survey %>%
 
 ```{r}
 urban_plot <- death_survey %>% 
-  mutate(rural_urban = case_when(
-    rural_urban == 2 ~ "rural",
+  mutate(rural = case_when(
+    rural == 1 ~ "rural",
     TRUE ~ "urban"
   )) %>%
-  group_by(wealth_quantile, gender, rural_urban) %>% 
-  summarize(registered_mean = survey_mean(registered_dummy, vartype = "se")) %>% 
-  ggplot(aes(x = wealth_quantile, y = registered_mean)) + 
+  group_by(wealth_quintile, gender, rural) %>% 
+  summarize(registered = survey_mean(registered, vartype = "se")) %>% 
+  ggplot(aes(x = wealth_quintile, y = registered)) + 
   geom_col(aes(fill = gender), color = "black", position = position_dodge2(width = 1, padding = 0.2), alpha = 0.5) + 
-  geom_text(aes(label = paste0(round(registered_mean, 2)* 100, "%")), vjust = -0.8, hjust = .4, position = position_dodge2(width = 1, padding = 0.2)) + 
+  geom_text(aes(label = paste0(round(registered, 2)* 100, "%")), vjust = -0.8, hjust = .4, position = position_dodge2(width = 1, padding = 0.2)) + 
   ggsci::scale_fill_lancet() +
   theme_cowplot() + 
   scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +
   theme(legend.position = "bottom") + 
   labs(x = "Wealth Quantile",
        y = "Death Registration") + 
-  facet_wrap(~rural_urban)
+  facet_wrap(~rural)
   
 ```
 
@@ -199,67 +195,37 @@ ggsave(full_plot, filename = here("figures", "death_registration.png"), width = 
 ```
 
 
-Other predictors: 
-
-— Presence of educated family member
-— Household size 
-— Geospatial stuff
-— Length of period between death and interview (months)
-— Caste 
-— Native language 
-— Number of children under 5
-— Marital status 
-— Mode of transport 
-— Exposure to media and literacy 
-— Household member disability 
-— District level covariates - district wealth, district mortality, education, etc. etc. 
-— Variables for health care access 
-— Digital variables - internet access, mobile phone access, etc. 
-
-
-```{r}
-summary(model)
-```
-
-
-```{r}
-set.seed(123)  # Setting seed for reproducibility
-
-# Create a random split indicator
-split <- sample(1:nrow(death_file), size = 0.7 * nrow(death_file))
-
-# Split the data into training and test sets
-training_sample <- death_file[split, ]
-test_sample <- death_file[-split, ]
-```
-
-
-```{r}
-model <- glm(sh91_ ~ death_age + female + as.factor(hv270) + as.factor(hv025) + as.factor(hv024), data = training_sample, family = "binomial")
-
-predict(model, newdata = test_sample, type = "response")
-
-test_sample %>% 
-  mutate(prediction = predict(model, newdata = test_sample, type = "response")) %>% 
-  mutate(prediction_binary = case_when(
-    prediction > 0.5 ~ 1,
-    TRUE ~ 0
-  )) %>% 
-  count(sh91_, prediction_binary)
-```
-
-
 
 
 ```{r}
 death_file %>% 
-  filter(months_since_death > 0 & months_since_death < 48) %>%
-  group_by(months_since_death) %>% 
-  summarize(prop_registered = mean(registered_dummy)) %>% 
-  ggplot(aes(x = months_since_death, y = prop_registered)) + 
-  geom_point() + 
-  geom_line() + 
-  theme_cowplot() +
-  ylim(0, 1)
+  filter(facility_distance < 100) %>% 
+  group_by(registered) %>% 
+  summarize(mean(facility_distance))
+
+
+death_file %>% 
+  group_by(registered) %>% 
+  summarize(mean(facility_distance))
+
+
+death_file %>% 
+  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
+  group_by(facility_distance_quantile) %>% 
+  summarize(mean(registered))
+
+death_file %>% 
+  mutate(distance = ntile(road_length_km/area_km2, n = 5)) %>% 
+  group_by(distance) %>% 
+  summarize(mean(registered))
+
+
+death_file %>% 
+ # count(is.na(road_length_km)) 
+  mutate(distance = ntile(road_length_km, n = 5)) %>% 
+  group_by(distance) %>% 
+  summarize(mean(registered))
+
+
 ```
 
