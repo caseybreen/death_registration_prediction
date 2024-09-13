@@ -208,12 +208,6 @@ death_file %>%
   group_by(registered) %>% 
   summarize(mean(facility_distance))
 
-
-death_file %>% 
-  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
-  group_by(facility_distance_quantile) %>% 
-  summarize(mean(registered))
-
 death_file %>% 
   mutate(distance = ntile(road_length_km/area_km2, n = 5)) %>% 
   group_by(distance) %>% 
@@ -221,11 +215,73 @@ death_file %>%
 
 
 death_file %>% 
+  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
+  group_by(facility_distance_quantile) %>% 
+  summarize(facility_distance = mean(registered)) %>% 
+  ggplot()
+
+
+
+
+death_file %>% 
  # count(is.na(road_length_km)) 
   mutate(distance = ntile(road_length_km, n = 5)) %>% 
   group_by(distance) %>% 
-  summarize(mean(registered))
+  summarize(mean = mean(registered))
 
 
 ```
+
+
+
+```{r}
+# First figure: Facility distance quantile vs mean registration likelihood
+facility_distance_plot <- death_file %>% 
+  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
+  group_by(facility_distance_quantile) %>% 
+  summarize(mean_registered = mean(registered, na.rm = TRUE)) %>% 
+  ggplot(aes(x = facility_distance_quantile, y = mean_registered)) +
+  geom_line() + 
+  geom_point() + 
+  labs(x = "Facility Distance (Quantile)", y = "Death Registration (%)", 
+       title = "Facility Distance") +
+  theme_cowplot()
+
+# Second figure: Road length quantile vs mean registration likelihood
+road_length_plot <- death_file %>% 
+  mutate(road_length_quantile = ntile(road_length_km/area_km2, n = 5)) %>% 
+  group_by(road_length_quantile) %>% 
+  summarize(mean_registered = mean(registered, na.rm = TRUE)) %>% 
+  ggplot(aes(x = road_length_quantile, y = mean_registered)) +
+  geom_line() + 
+  geom_point() + 
+  labs(x = "Road Length/km^2 (Quantile)", y = "Death Registration (%)", 
+       title = "Road Length") +
+  theme_cowplot()
+
+# Display both plots
+death_registration_distance <- plot_grid(facility_distance_plot, road_length_plot)
+
+ggsave(death_registration_distance, filename = here("figures", "death_registration_distance.png"), width = 8, height = 4, bg = "white")
+```
+
+
+
+
+```{r}
+death_reg_over_time <- death_file %>% 
+  group_by(months_since_death) %>% 
+  summarize(registered = mean(registered)) %>% 
+  ggplot(aes(x = months_since_death, y = registered)) + 
+  geom_line() + 
+  geom_point() + 
+  theme_cowplot() + 
+  labs(x = "Months since death",
+       y = "Deaths Registered (%)") + 
+  ylim(0, 1)
+
+ggsave(death_reg_over_time, filename = here("figures", "death_reg_over_time.png"), width = 6, height = 4, bg = "white")
+
+```
+
 

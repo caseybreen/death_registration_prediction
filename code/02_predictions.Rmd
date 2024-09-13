@@ -1,6 +1,6 @@
 ---
-title: "R Notebook"
-output: html_notebook
+title: "Machine learning set up"
+author: Casey Breen
 ---
 
 Other predictors: 
@@ -35,11 +35,12 @@ library(here)
 library(srvyr)
 library(sl3)
 library(tictoc)
+library(yardstick)
 
 
 ## read in death file 
 death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA")) %>% 
-  filter(months_since_death > 6)
+  filter(months_since_death > 3)
 ```
 
 
@@ -50,9 +51,11 @@ death_file <- death_file %>%
   mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
   mutate(road_length_km_quantile = ntile(road_length_km, n = 5))
   
-
 death_file <- death_file %>% 
   filter(!is.na(area_km2))
+
+
+death_file
 ```
 
 
@@ -91,10 +94,12 @@ model <- glm(registered ~ death_age + female + as.factor(wealth_quintile) + as.f
 
 predict(model, newdata = test_sample, type = "response")
 
+test_sample <- test_sample %>% 
+  mutate(prediction_logit = predict(model, newdata = test_sample, type = "response")) 
+
 test_sample %>% 
-  mutate(prediction = predict(model, newdata = test_sample, type = "response")) %>% 
   mutate(prediction_binary = case_when(
-    prediction > 0.5 ~ 1,
+    prediction_logit > 0.5 ~ 1,
     TRUE ~ 0
   )) %>% 
   count(registered, prediction_binary) %>% 
@@ -114,7 +119,7 @@ covariates <- c("death_age", "female", "wealth_quintile", "native_language", "in
                 "cycle", "external_death", "female_head", "altitude_quintile", "facility_distance_quantile", "road_length_km_quantile")
 
 
-task <- make_sl3_Task(data = training_sample %>% sample_n(10000), covariates = covariates, outcome = outcome, outcome_type = "binomial")
+task <- make_sl3_Task(data = training_sample, covariates = covariates, outcome = outcome, outcome_type = "binomial")
 
 ```
 
@@ -236,8 +241,16 @@ predicted_observed <- test_sample %>%
 
 
 ```{r}
+task <- make_sl3_Task(data = training_sample %>% sample_n(1000), covariates = covariates, outcome = outcome, outcome_type = "binomial")
+
+tic()
+fit <- super_learner$train(task)
+toc()
+
+
 ashb_varimp <- sl3::importance(
-  fit = fit, eval_fun = loss_squared_error, type = "permute")
+  fit = fit, eval_fun = loss_squared_error, type = "remove")
+
 
 
 variable_importance_fig <- ashb_varimp %>% 
@@ -260,5 +273,65 @@ prediction_combined_figure <- cowplot::plot_grid(confusion_matrix_plot, predicte
 ## predictions 
 ggsave(prediction_combined_figure, filename = here("figures", "prediction_combined_figure.png"), height = 10, width= 12, bg = "white") 
 ```
+
+
+```{r}
+test_sample %>% 
+  select(prediction_binary, registered)
+```
+
+
+```{r}
+# Create ROC curve
+roc_curve <- roc(test_sample, registered, prediction_logit)
+
+# Plot ROC curve
+plot(roc_curve, main="ROC Curve", col="blue", lwd=2)
+
+# Create ROC curve for logistic regression
+roc_curve_logit <- roc(test_sample, registered, prediction_logit)
+
+# Create ROC curve for machine learning model
+roc_curve_ml <- roc(test_sample, registered, prediction)
+
+# Plot ROC curve for logistic regression
+plot(roc_curve_logit, main = "Comparison of ROC Curves", col = "blue", lwd = 2)
+
+# Add ROC curve for machine learning model to the same plot
+plot(roc_curve_ml, col = "red", lwd = 2, add = TRUE)
+
+# Add legend to the plot
+legend("bottomright", legend = c("Logistic Regression", "Machine Learning Model"),
+       col = c("blue", "red"), lwd = 2)
+
+```
+
+```{r}
+
+test_sample <- test_sample %>% 
+  mutate(registered_factor = as.factor(registered))
+
+# Calculate ROC curve for logistic regression
+roc_logit <- roc_curve(data = test_sample , truth = registered_factor, prediction_logit)
+
+# Calculate ROC curve for machine learning model
+roc_ml <- roc_curve(data = test_sample, truth = registered_factor, prediction)
+
+# Combine ROC curves into one data frame for plotting
+roc_combined <- bind_rows(
+  roc_logit %>% mutate(model = "Logistic Regression"),
+  roc_ml %>% mutate(model = "Machine Learning Model")
+)
+
+# Plot ROC curves using ggplot2
+ggplot(roc_combined, aes(x = specificity, y = 1- sensitivity, color = model)) +
+  geom_line(size = 1.2) +
+  labs(title = "Comparison of ROC Curves", x = "1 - Specificity", y = "Sensitivity") +
+  theme_cowplot() +
+  scale_color_manual(values = c("blue", "red")) + 
+  theme(legend.position = "bottomright") +
+  geom_abline(slope = 1, linetype = "dashed", color = "grey")
+```
+
 
 
