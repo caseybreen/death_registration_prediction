@@ -1,0 +1,193 @@
+---
+title: "Machine learning set up"
+author: Casey Breen
+---
+
+Other predictors: 
+
+— Presence of educated family member
+— Household size 
+— Geospatial stuff
+— Length of period between death and interview (months)
+— Caste 
+— Native language 
+— Number of children under 5
+— Marital status 
+— Mode of transport 
+— Exposure to media and literacy 
+— Household member disability 
+— District level covariates - district wealth, district mortality, education, etc. etc. 
+— Variables for health care access 
+— Digital variables - internet access, mobile phone access, etc. 
+
+
+## notes for aashish 
+
+- missing in household and missing in 
+
+
+```{r}
+## library packages 
+library(tidyverse)
+library(haven)
+library(cowplot)
+library(here)
+library(srvyr)
+library(sl3)
+library(tictoc)
+library(yardstick)
+
+## read in death file 
+death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA")) %>% 
+  filter(months_since_death > 3) %>% 
+  group_by(state) %>% 
+  filter(n() > 1000) %>% 
+  filter(death_age >= 5) %>% 
+  ungroup()
+```
+
+
+
+
+```{r}
+death_file <- death_file %>% 
+  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
+  mutate(road_length_km_quantile = ntile(road_length_km, n = 5))
+  
+death_file <- death_file %>% 
+  filter(!is.na(area_km2))
+```
+
+
+
+
+```{r}
+set.seed(123)  # Setting seed for reproducibility
+
+# Create a random split indicator
+split <- sample(1:nrow(death_file), size = 0.7 * nrow(death_file))
+
+# Split the data into training and test sets
+training_sample <- death_file[split, ]
+test_sample <- death_file[-split, ]
+```
+
+
+
+
+```{r}
+## baseline model 
+model <- glm(registered ~ death_age + female + as.factor(wealth_quintile) + as.factor(native_language) + as.factor(internet) + highest_education + as.factor(health_insurance) + as.factor(rural) + as.factor(state) + own_land + cycle + external_death + female_head + as.factor(altitude_quintile), data = training_sample, family = "binomial")
+
+predict(model, newdata = test_sample, type = "response")
+
+test_sample <- test_sample %>% 
+  mutate(prediction_logit = predict(model, newdata = test_sample, type = "response")) 
+
+test_sample %>% 
+  mutate(prediction_binary = case_when(
+    prediction_logit > 0.5 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  count(registered, prediction_binary) %>% 
+  mutate(prop = n / sum(n))
+```
+
+
+
+
+```{r}
+# List of unique states
+regions <- unique(training_sample$region)
+
+# Empty list to store results for each state
+state_results <- list()
+
+# Loop over each state, fit the model, and collect the results
+for (st in regions) {
+  # Filter data for the specific state
+  train_state <- training_sample %>% filter(region == st)
+  test_state <- test_sample %>% filter(region == st)
+  
+  # Fit the model for the specific state
+  model_state <- glm(registered ~ death_age + female + as.factor(wealth_quintile) + 
+                     as.factor(internet) + highest_education + as.factor(health_insurance) + 
+                     as.factor(rural) + own_land + cycle + external_death + as.factor(state) +  
+                     female_head + as.factor(altitude_quintile), 
+                     data = train_state, family = "binomial")
+  
+  # Make predictions for the test set of the specific state
+  test_state <- test_state %>%
+    mutate(prediction_logit = predict(model_state, newdata = test_state, type = "response")) %>%
+    mutate(prediction_binary = case_when(
+      prediction_logit > 0.5 ~ 1,
+      TRUE ~ 0
+    ))
+  
+  # Store the result for this state
+  state_results[[st]] <- test_state %>%
+    count(registered, prediction_binary) %>%
+    mutate(prop = n / sum(n))
+}
+
+# Combine all state results into one dataframe for aggregation
+final_results <- bind_rows(state_results, .id = "state")
+
+# Aggregate the results across states
+final_aggregated_results <- final_results %>%
+  group_by(registered, prediction_binary) %>%
+  summarise(n_total = sum(n), .groups = 'drop') %>%
+  mutate(prop_total = n_total / sum(n_total))
+
+# Display aggregated results
+print(final_aggregated_results)
+```
+
+
+```{r}
+# List of unique states
+states <- unique(training_sample$state)
+
+# Empty list to store results for each state
+state_results <- list()
+
+# Loop over each state, fit the model, and collect the results
+for (st in states) {
+  # Filter data for the specific state
+  train_state <- training_sample %>% filter(state == st)
+  test_state <- test_sample %>% filter(state == st)
+  
+  # Fit the model for the specific state
+  model_state <- glm(registered ~ death_age:female + as.factor(wealth_quintile):female + 
+                     as.factor(internet) + highest_education + as.factor(health_insurance) + 
+                     as.factor(rural) + own_land + cycle + external_death + 
+                     female_head , 
+                     data = train_state, family = "binomial")
+  
+  # Make predictions for the test set of the specific state
+  test_state <- test_state %>%
+    mutate(prediction_logit = predict(model_state, newdata = test_state, type = "response")) %>%
+    mutate(prediction_binary = case_when(
+      prediction_logit > 0.5 ~ 1,
+      TRUE ~ 0
+    ))
+  
+  # Store the result for this state
+  state_results[[st]] <- test_state %>%
+    count(registered, prediction_binary) %>%
+    mutate(prop = n / sum(n))
+}
+
+# Combine all state results into one dataframe for aggregation
+final_results <- bind_rows(state_results, .id = "state")
+
+# Aggregate the results across states
+final_aggregated_results <- final_results %>%
+  group_by(registered, prediction_binary) %>%
+  summarise(n_total = sum(n), .groups = 'drop') %>%
+  mutate(prop_total = n_total / sum(n_total))
+
+# Display aggregated results
+print(final_aggregated_results)
+```
+

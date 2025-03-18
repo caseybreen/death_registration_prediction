@@ -1,0 +1,190 @@
+---
+title: "Machine learning set up"
+author: Casey Breen
+---
+
+Other predictors: 
+
+— Presence of educated family member
+— Household size 
+— Geospatial stuff
+— Length of period between death and interview (months)
+— Caste 
+— Native language 
+— Number of children under 5
+— Marital status 
+— Mode of transport 
+— Exposure to media and literacy 
+— Household member disability 
+— District level covariates - district wealth, district mortality, education, etc. etc. 
+— Variables for health care access 
+— Digital variables - internet access, mobile phone access, etc. 
+
+
+## notes for aashish 
+
+- Missing in household and missing in 
+
+
+```{r}
+## library packages 
+library(tidyverse)
+library(haven)
+library(cowplot)
+library(here)
+library(srvyr)
+library(sl3)
+library(tictoc)
+library(yardstick)
+library(tidymodels)
+
+## read in death file 
+death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA")) %>% 
+  filter(months_since_death > 3) %>% 
+  mutate(registered = as.factor(registered))
+```
+
+
+
+```{r}
+death_file <- death_file %>% 
+  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
+  mutate(road_length_km_quantile = ntile(road_length_km, n = 5))
+  
+death_file <- death_file %>% 
+  filter(!is.na(area_km2))
+```
+
+
+```{r}
+## u5 deaths 
+death_file_u5 <- death_file %>% 
+  filter(death_age < 5)
+
+## 5+ deaths 
+death_file_5_plus <- death_file %>% 
+  filter(death_age >= 5)
+```
+
+
+
+
+
+```{r}
+# set up 10 fold CV
+folds_10fold_u5 <- vfold_cv(death_file_u5, 10)
+folds_10fold_5_plus <- vfold_cv(death_file_5_plus, 10)
+
+
+# Define the model specification
+rf_model <- rand_forest(trees = 500, min_n = 5, mode = "classification") %>%
+  set_engine("ranger", importance = "permutation")
+
+# Define the recipe for data preprocessing
+rf_recipe <- recipe(registered ~ death_age + female +
+                      wealth_quintile + facility_distance_quantile + region + 
+                      road_length_km_quantile + 
+                      native_language + internet + 
+                      highest_education + health_insurance + 
+                      rural + own_land + cycle + 
+                      external_death + female_head + state + 
+                      altitude_quintile, data = death_file) %>%
+  step_dummy(all_nominal_predictors()) %>% # Convert categorical to dummy variables
+  step_normalize(all_numeric_predictors()) # Normalize numeric predictors
+
+# Create a workflow
+rf_workflow <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+```
+
+```{r}
+# Fit the model
+rf_fit_u5 <- rf_workflow %>%
+  fit_resamples(resamples = folds_10fold_u5,
+                control = control_resamples(save_pred = TRUE))
+
+## get error metrics  
+error_metrics_loco_cv_u5 <- collect_metrics(rf_fit_u5) 
+
+## get error metrics  
+predictions_u5 <- collect_predictions(rf_fit_u5) 
+```
+
+
+```{r}
+# Fit the model
+rf_fit_5plus <- rf_workflow %>%
+  fit_resamples(resamples = folds_10fold_5_plus,
+                control = control_resamples(save_pred = TRUE))
+
+## get error metrics  
+error_metrics_loco_cv_5_plus <- collect_metrics(rf_fit_5plus) 
+
+## get error metrics  
+predictions_5_plus <- collect_predictions(rf_fit_5plus) 
+```
+
+
+
+```{r}
+# Create confusion matrix
+confusion_matrix_u5 <- predictions_u5 %>%
+  count(registered, .pred_class) %>%
+  mutate(prop = paste0(round(n / sum(n) * 100), "%"))
+
+# Plot with corrected code
+confusion_matrix_plot_u5 <- confusion_matrix_u5 %>% 
+  mutate(registered = case_when(
+    registered == 1 ~ "Yes", 
+    TRUE ~ "No")) %>% 
+    mutate(.pred_class = case_when(
+    .pred_class == 1 ~ "Yes", 
+    TRUE ~ "No")) %>% 
+  mutate(n_alt = paste0("(", n, ")")) %>% 
+ggplot(aes(x = registered, 
+           y = .pred_class, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = prop), vjust = 1.5) +
+  geom_text(aes(label = n_alt), vjust = 3.5) +
+  scale_fill_gradient(low = "white", high = "steelblue", name = "Count") +
+  labs(y = "Predicted", x = "Observed", title = "Deaths Under 5") +
+  theme_minimal(base_size = 15) + 
+  theme(legend.position = "none")
+
+# Create confusion matrix
+confusion_matrix_5plus <- predictions_5_plus %>%
+  count(registered, .pred_class) %>%
+  mutate(prop = paste0(round(n / sum(n) * 100), "%"))
+
+
+# Plot with corrected code
+confusion_matrix_plot_5_plus <- confusion_matrix_5plus %>% 
+  mutate(registered = case_when(
+    registered == 1 ~ "Yes", 
+    TRUE ~ "No")) %>% 
+    mutate(.pred_class = case_when(
+    .pred_class == 1 ~ "Yes", 
+    TRUE ~ "No")) %>% 
+  mutate(n_alt = paste0("(", n, ")")) %>% 
+ggplot(aes(x = registered, 
+           y = .pred_class, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = prop), vjust = 1.5) +
+  geom_text(aes(label = n_alt), vjust = 3.5) +
+  scale_fill_gradient(low = "white", high = "steelblue", name = "Count") +
+  labs(y = "Predicted", x = "Observed", title = "Death 5+") +
+  theme_minimal(base_size = 15) + 
+  theme(legend.position = "none")
+```
+
+
+
+```{r}
+age_plot <- cowplot::plot_grid(confusion_matrix_plot_u5, confusion_matrix_plot_5_plus)
+
+ggsave(age_plot, filename = here("figures", "age_plot.png"), height = 4, width= 8, bg = "white") 
+```
+
+

@@ -54,7 +54,6 @@ death_file <- death_file %>%
 death_file <- death_file %>% 
   filter(!is.na(area_km2))
 
-
 death_file
 ```
 
@@ -118,7 +117,7 @@ covariates <- c("death_age", "female", "wealth_quintile", "native_language", "in
                 "highest_education", "health_insurance", "rural", "state", "own_land", 
                 "cycle", "external_death", "female_head", "altitude_quintile", "facility_distance_quantile", "road_length_km_quantile")
 
-
+## task 
 task <- make_sl3_Task(data = training_sample, covariates = covariates, outcome = outcome, outcome_type = "binomial")
 
 ```
@@ -132,7 +131,6 @@ lrn_gbm <- Lrnr_gbm$new()    # Gradient boosting machine learner
 
 # Combine learners into a learner stack
 learner_stack <- sl3::Stack$new(lrn_glm, lrn_rf, lrn_gbm)
-
 ```
 
 
@@ -215,9 +213,6 @@ disn_of_predictions <- test_sample %>%
 ```
 
 
-
-
-
 ```{r}
 predicted_observed <- test_sample %>% 
   mutate(test = cut(prediction, breaks = quantile(prediction, probs = seq(0, 1, by = .01)), include.lowest = TRUE)) %>% 
@@ -235,8 +230,6 @@ predicted_observed <- test_sample %>%
   ylim(0, 1) + 
   labs(x = "Observed",
        y = "Predicted")
-
-
 ```
 
 
@@ -247,10 +240,8 @@ tic()
 fit <- super_learner$train(task)
 toc()
 
-
 ashb_varimp <- sl3::importance(
   fit = fit, eval_fun = loss_squared_error, type = "remove")
-
 
 
 variable_importance_fig <- ashb_varimp %>% 

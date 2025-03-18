@@ -1,0 +1,250 @@
+---
+title: "Machine learning set up"
+author: Casey Breen
+---
+
+Other predictors: 
+
+— Presence of educated family member
+— Household size 
+— Geospatial stuff
+— Length of period between death and interview (months)
+— Caste 
+— Native language 
+— Number of children under 5
+— Marital status 
+— Mode of transport 
+— Exposure to media and literacy 
+— Household member disability 
+— District level covariates - district wealth, district mortality, education, etc. etc. 
+— Variables for health care access 
+— Digital variables - internet access, mobile phone access, etc. 
+
+
+## notes for aashish 
+
+- Missing in household and missing in 
+
+
+```{r}
+## library packages 
+library(tidyverse)
+library(haven)
+library(cowplot)
+library(here)
+library(srvyr)
+library(sl3)
+library(tictoc)
+library(yardstick)
+library(tidymodels)
+
+## read in death file 
+death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA")) %>% 
+  filter(months_since_death > 3) %>% 
+  # group_by(state) %>% 
+  # filter(n() > 1000) %>% 
+  filter(death_age > 5) %>% 
+  mutate(state = as.factor(state)) %>% 
+  mutate(registered = as.factor(registered))
+```
+
+
+
+```{r}
+death_file <- death_file %>% 
+  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
+  mutate(road_length_km_quantile = ntile(road_length_km, n = 5))
+  
+death_file <- death_file %>% 
+  filter(!is.na(area_km2))
+```
+
+
+
+
+```{r}
+set.seed(12)  # Setting seed for reproducibility
+
+# Create a random split indicator
+split <- sample(1:nrow(death_file), size = 0.7 * nrow(death_file))
+
+# Split the data into training and test sets
+training_sample <- death_file[split,]
+test_sample <- death_file[-split, ]
+```
+
+
+
+
+```{r}
+## baseline model 
+model <- glm(registered ~ death_age + female + as.factor(wealth_quintile) + native_language + as.factor(internet) + highest_education + as.factor(health_insurance) + as.factor(rural) + as.factor(state) + own_land + cycle + external_death + female_head + as.factor(altitude_quintile), data = training_sample, family = "binomial")
+
+predict(model, newdata = test_sample, type = "response")
+
+test_sample <- test_sample %>% 
+  mutate(prediction_logit = predict(model, newdata = test_sample, type = "response")) 
+
+test_sample %>% 
+  mutate(prediction_binary = case_when(
+    prediction_logit > 0.5 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  count(registered, prediction_binary) %>% 
+  mutate(prop = n / sum(n))
+```
+
+
+
+
+```{r}
+# make new folds based on country 
+# folds_loco <- group_vfold_cv(internet_df_train, group = state)
+folds_10fold <- vfold_cv(death_file, 10)
+
+# Define the model specification
+rf_model <- rand_forest(trees = 500, min_n = 5, mode = "classification") %>%
+  set_engine("ranger")
+
+# Define the recipe for data preprocessing
+rf_recipe <- recipe(registered ~ death_age + female + wealth_quintile + 
+                      native_language + internet + 
+                      highest_education + health_insurance + 
+                      rural + own_land + cycle + 
+                      external_death + female_head + 
+                      altitude_quintile, data = death_file %>% mutate(state = as.character(state))) %>%
+  step_dummy(all_nominal_predictors()) %>% # Convert categorical to dummy variables
+  step_normalize(all_numeric_predictors()) # Normalize numeric predictors
+
+# Create a workflow
+rf_workflow <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+# Fit the model
+rf_fit <- rf_workflow %>%
+  fit_resamples(resamples = folds_10fold,
+                control = control_resamples(save_pred = TRUE))
+
+## get error metrics  
+error_metrics_loco_cv <- collect_metrics(rf_fit) 
+
+## get error metrics  
+predictions <- collect_predictions(rf_fit) 
+
+death_file <- death_file %>% 
+  mutate(row = row_number())
+
+predictions <- predictions %>% 
+  left_join(death_file, by = c(".row" = "row"))
+
+predictions %>% 
+  group_by(state) %>% 
+  mutate(registered = as.numeric(registered.x) - 1) %>% 
+  mutate(.pred_class = as.numeric(.pred_class) - 1) %>% 
+  summarize(observed = mean(registered),
+            predicted = mean(.pred_class),
+            sample = n()) %>% 
+  #filter(sample > 10) %>% 
+  ggplot(aes(x = observed, y = predicted)) + 
+  geom_point() + 
+  ylim(0, 1) + 
+  xlim(0, 1) + 
+  theme_cowplot() +
+  geom_abline(color = "red", linetype = "dashed") + 
+  ggpubr::stat_cor()
+
+
+predictions %>% 
+  mutate(registered = as.numeric(registered.x) - 1) %>% 
+  mutate(.pred_class = as.numeric(.pred_class) - 1) %>% 
+  summarize(observed = mean(registered),
+            predicted = mean(.pred_class),
+            sample = n())
+
+predictions %>% 
+    mutate(registered = as.numeric(registered.x) - 1) %>% 
+  group_by(female) %>% 
+  mutate(decile = ntile(.pred_1, 100)) %>% 
+  group_by(decile, female) %>% 
+  summarize(reg = mean(registered),
+            pred = mean(.pred_1)) %>% 
+  ggplot(aes(x = reg, y = pred)) + 
+  geom_point() + 
+  geom_abline() + 
+  ylim(0, 1) + 
+  xlim(0, 1) + 
+  theme_cowplot() + 
+  facet_wrap(~female)
+```
+
+```{r}
+predictions %>% 
+  filter(.pred_1 > 0.95) %>% 
+  count(internet)
+```
+
+
+```{r}
+## make new folds based on country 
+# folds_loco <- group_vfold_cv(internet_df_train, group = state)
+folds_10fold <- group_vfold_cv(death_file, state)
+
+# Define the model specification
+rf_model <- rand_forest(trees = 500, min_n = 5, mode = "classification") %>%
+  set_engine("ranger")
+
+
+# Define the recipe for data preprocessing
+rf_recipe <- recipe(registered ~ death_age + female + wealth_quintile + 
+                      native_language + internet + 
+                      highest_education + health_insurance + 
+                      rural + own_land + cycle + 
+                      external_death + female_head + 
+                      altitude_quintile, data = death_file %>% mutate(state = as.character(state))) %>%
+  step_dummy(all_nominal_predictors()) %>% # Convert categorical to dummy variables
+  step_normalize(all_numeric_predictors()) # Normalize numeric predictors
+
+# Create a workflow
+rf_workflow <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+# Fit the model
+rf_fit <- rf_workflow %>%
+  fit_resamples(data = death_file %>% mutate(registered = as.factor(registered)), 
+                resamples = folds_10fold,
+                control = control_resamples(save_pred = TRUE))
+
+## get error metrics  
+error_metrics_loco_cv <- collect_metrics(rf_res_loco_cv) 
+
+## get error metrics  
+error_metrics_loco_cv <- collect_predictions(rf_res_loco_cv) 
+
+error_metrics_loco_cv %>% 
+  ungroup() %>% 
+  mutate(registered = as.numeric(registered) - 1) %>% 
+  mutate(.pred_class = as.numeric(.pred_class) - 1) %>% 
+  group_by(id) %>% 
+  filter(n() > 300) %>% 
+  summarize(observed = mean(registered),
+            predicted = mean(.pred_class)) %>% 
+  ggplot() + 
+  geom_point(aes(x = observed, y = predicted)) + 
+  ylim(0, 1) + 
+  xlim(0, 1) + 
+  theme_cowplot() +
+  geom_abline(color = "red", linetype = "dashed")
+
+error_metrics_loco_cv %>% 
+  ungroup() %>% 
+  mutate(registered = as.numeric(registered) - 1) %>% 
+  mutate(.pred_class = as.numeric(.pred_class) - 1) %>% 
+  # group_by(id) %>% 
+  # filter(n() > 300) %>% 
+  summarize(observed = mean(registered),
+            predicted = mean(.pred_class)) 
+```
+
+

@@ -1,0 +1,181 @@
+---
+title: "Machine learning set up"
+author: Casey Breen
+---
+
+Other predictors: 
+
+— Presence of educated family member
+— Household size 
+— Geospatial stuff
+— Length of period between death and interview (months)
+— Caste 
+— Native language 
+— Number of children under 5
+— Marital status 
+— Mode of transport 
+— Exposure to media and literacy 
+— Household member disability 
+— District level covariates - district wealth, district mortality, education, etc. etc. 
+— Variables for health care access 
+— Digital variables - internet access, mobile phone access, etc. 
+
+
+## notes for aashish 
+
+- Missing in household and missing in 
+
+
+```{r}
+## library packages 
+library(tidyverse)
+library(haven)
+library(cowplot)
+library(here)
+library(srvyr)
+library(sl3)
+library(tictoc)
+library(yardstick)
+library(tidymodels)
+library(vip)         # for variable importance plots
+
+
+## read in death file 
+death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA")) %>% 
+  filter(months_since_death > 3) %>% 
+  mutate(registered = as.factor(registered))
+```
+
+
+
+```{r}
+death_file <- death_file %>% 
+  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
+  mutate(road_length_km_quantile = ntile(road_length_km, n = 5))
+  
+death_file <- death_file %>% 
+  filter(!is.na(area_km2))
+```
+
+
+```{r}
+set.seed(12)  # Setting seed for reproducibility
+
+death_file_split <- initial_split(death_file, 0.75)
+training_sample <- training(death_file_split)
+test_sample  <- testing(death_file_split)
+```
+
+
+
+
+
+
+
+```{r}
+# Define the model specification
+rf_model <- rand_forest(trees = 500, min_n = 5, mode = "classification") %>%
+  set_engine("ranger", importance = "permutation")
+
+# Function to fit model for each region and extract variable importance
+fit_model_by_region <- function(region_data, region_name) {
+  
+  # Define the recipe for data preprocessing
+  rf_recipe <- recipe(registered ~ death_age + female +
+                      wealth_quintile + facility_distance_quantile  + 
+                      road_length_km_quantile + 
+                      native_language + internet + 
+                      highest_education + health_insurance + 
+                      rural + own_land + cycle + 
+                      external_death + female_head + state + 
+                      altitude_quintile, data = region_data) %>%
+    step_dummy(all_nominal_predictors()) %>% 
+    step_normalize(all_numeric_predictors()) 
+
+  # Create a workflow
+  rf_workflow <- workflow() %>%
+    add_model(rf_model) %>%
+    add_recipe(rf_recipe)
+
+  # Fit the model
+  rf_fit <- rf_workflow %>%
+    fit(data = region_data %>% mutate(registered = as.factor(registered)))
+
+  # Extract variable importance
+  var_importance <- vi(rf_fit$fit$fit) %>%
+    mutate(region = region_name) # Add region identifier
+
+  return(list(model = rf_fit, importance = var_importance))
+}
+
+# Split training data by region
+region_training_samples <- training_sample %>% group_split(region)
+region_names <- training_sample %>% distinct(region) %>% pull(region)
+
+# Fit models and extract variable importance
+region_fits <- map2(region_training_samples, region_names, fit_model_by_region)
+
+# Extract variable importance from each model
+variable_importance_all <- bind_rows(map(region_fits, ~ .x$importance))
+
+# View variable importance
+region_importance_plot <- variable_importance_all %>% 
+  mutate(Variable = case_when(
+    Variable == "state" ~ "State",
+    Variable == "region" ~ "Region",
+    Variable == "native_language" ~ "Native Language",
+    Variable == "wealth_quintile" ~ "Wealth Quintile",
+    Variable == "altitude_quintile" ~ "Altitude Quintile",
+    Variable == "death_age" ~ "Age at Death",
+    Variable == "highest_education" ~ "Highest Education",
+    Variable == "road_length_km_quantile" ~ "Road Length (km)",
+    Variable == "rural" ~ "Rural Area",
+    Variable == "facility_distance_quantile" ~ "Facility Distance",
+    Variable == "internet" ~ "Internet Access",
+    Variable == "female" ~ "Female",
+    Variable == "female_head" ~ "Female Household Head",
+    Variable == "health_insurance" ~ "Health Insurance",
+    Variable == "cycle" ~ "Bicycle Ownership",
+    Variable == "own_land" ~ "Owns Land",
+    Variable == "external_death" ~ "External Cause of Death",
+    TRUE ~ Variable  # Keep others unchanged
+  )) %>% 
+  mutate(region = as_factor(region)) %>% 
+  group_by(region) %>% 
+ mutate(Importance = Importance / max(Importance)) %>% 
+  ggplot(aes(y = reorder(Variable, Importance), x = Importance)) +
+  ggsci::scale_fill_lancet() + 
+geom_col(aes(fill = region), color = "black", position = position_dodge2(1), width = .8) + 
+  theme_cowplot() + 
+  theme(legend.position = "bottom") + 
+  labs(x = "Importance",
+       y = "")
+
+ggsave(region_importance_plot, filename = here("figures", "region_importance_plot.png"), height = 10, width= 7, bg = "white") 
+```
+
+
+```{r}
+# # View variable importance, normalize within each region, and order by importance
+# variable_importance_all %>% 
+#   mutate(region = as_factor(region)) %>% 
+#   group_by(region) %>% 
+#   mutate(Importance = Importance / mean(Importance)) %>% 
+#   arrange(region, desc(Importance)) %>%  # Ensure importance is arranged in descending order within each region
+#   ggplot(aes(y = reorder_within(Variable, Importance, region), x = Importance)) +  # Order within facets
+#   geom_col(color = "black", fill = "grey") + 
+#   facet_wrap(~region, scales = "free_y") +  # Free scales for better comparison
+# #  scale_y_reordered() +  # Ensures proper ordering within facets
+#   theme_minimal() + 
+#   labs(title = "Variable Importance by Region",
+#        x = "Relative Importance",
+#        y = "Variable")
+
+```
+
+
+
+
+
+
+

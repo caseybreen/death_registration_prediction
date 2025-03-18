@@ -1,0 +1,138 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+## library packages 
+library(tidyverse)
+library(haven)
+library(cowplot)
+library(here)
+library(srvyr)
+library(sl3)
+library(tictoc)
+library(yardstick)
+library(broom)
+
+## read in death file 
+death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA")) %>% 
+  filter(months_since_death > 3) %>% 
+  mutate(region = as_factor(region)) %>% 
+  group_by(region) %>% 
+  filter(death_age >= 5)
+
+
+death_file <- death_file %>% 
+  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
+  mutate(road_length_km_quantile = ntile(road_length_km, n = 5))
+```
+
+
+```{r}
+death_file %>% 
+  mutate(region = as_factor(region)) %>% 
+  group_by(region) %>% 
+  count(region)
+```
+
+
+
+
+```{r}
+# Group data by state, then perform regression for each state
+results <- death_file %>%
+  group_by(region) %>%
+  nest() %>%
+  mutate(
+    model = map(data, ~ glm(death_age ~ facility_distance_quantile + female + highest_education + external_death, 
+                            data = ., family = gaussian())),
+    tidy_model = map(model, tidy)
+  ) %>%
+  unnest(tidy_model) %>%
+  select(region, term, estimate, std.error, statistic, p.value) %>% 
+  filter(term != "(Intercept)")  # Exclude intercept for clearer interpretation
+```
+
+
+```{r}
+# Perform grouped regression and create results table
+results <- death_file %>%
+  group_by(state) %>%
+  nest() %>%
+  mutate(
+    model = map(data, ~ glm(registered ~ female, 
+                            data = ., family = gaussian())),
+    tidy_model = map(model, tidy)
+  ) %>%
+  unnest(tidy_model) %>%
+  select(state, term, estimate, std.error, statistic, p.value) %>%
+  filter(term != "(Intercept)")  # Exclude intercept for clearer interpretation
+
+# Generate LaTeX table
+results
+
+death_file %>% 
+  group_by(region, female) %>% 
+  summarize(reg = mean(registered)) %>% 
+  group_by(region) %>% 
+  summarize(max(reg) - min(reg))
+
+```
+
+
+```{r}
+# Define the predictors
+predictors <- c("death_age", "facility_distance_quantile", "female", "highest_education", "external_death", "rural", "road_length_km", "wealth_quintile", "own_land", "internet", "native_language", "female_head")
+
+
+# Initialize an empty data frame to store results
+results <- data.frame()
+
+# Loop over each state and perform univariate regressions
+for (state_id in unique(death_file$region)) {
+  # Filter data for the current state
+  state_data <- filter(death_file, region == state_id)
+  
+  for (predictor in predictors) {
+    # Perform univariate regression
+    model <- lm(as.formula(paste("registered ~", as.factor(predictor))), data = state_data)
+    
+    # Manually calculate R-squared for univariate regression
+    r_squared <- cor(state_data[[predictor]], state_data$registered, use = "complete.obs")^2
+    
+    # Extract coefficient, standard error, t-value, and p-value
+    tidy_model <- tidy(model)
+    predictor_row <- tidy_model %>% filter(term == predictor)
+    
+    # Append results to the results data frame
+    results <- bind_rows(
+      results,
+      data.frame(
+        state = state_id,
+        predictor = predictor,
+        estimate = predictor_row$estimate,
+        std_error = predictor_row$std.error,
+        t_value = predictor_row$statistic,
+        p_value = predictor_row$p.value,
+        r_squared = r_squared
+      )
+    )
+  }
+}
+
+# Create a bar plot to visualize R-squared values
+ggplot(results, aes(y = predictor, x = r_squared, fill = state)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Most important predictors (deaths age 5+)",
+    y = "Predictor",
+    x = "R-Squared",
+    fill = "Region"
+  ) + 
+  theme_cowplot() 
+```
+
+
+
+
