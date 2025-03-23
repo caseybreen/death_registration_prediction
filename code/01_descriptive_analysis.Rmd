@@ -3,50 +3,20 @@ title: "Exploration of NFHS death file"
 author: Casey Breen
 ---
 
+## Summary
 
-## Read in data 
+Summary: Descriptive analysis of death registration rates in India, disaggregated by age, sex, and wealth quintile. 
 
 
 ```{r}
 ## library packages 
-library(tidyverse)
-library(haven)
-library(cowplot)
 library(here)
-library(srvyr)
+source(here("code", "helpers.R")) ## library all packages for analysis 
 
 ## read in death file 
 death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA"))
 ```
 
-
-## clean up variables 
-
-- Each row corresponds to a death 
-- Each column corresponds to a variable
-
-
-variable definitions to recode: 
-
-- hv024 = state of household (new var, state)
-- shdist = district of household (new var, district)
-- sh91_ = death_registration (new var, registered)
-- hv001 = cluster number 
-- hv005 = household weight 
-- hv009 = number of household members
-
-other key variables (not recodes)
-
-- death age = age of death 
-- female = female gender 
-- native_language = native language 
-- altitude_quintile = altitude quintile 
-- pregnancy_death = pregnancy related death 
-- external_death = external cause of death
-- month_since_death = months since death
-- caste_religion = caste religion 
-- highest_education = highest education of household member 
-- working_members = working age household members 
 
 ```{r}
 ## death registration 
@@ -64,34 +34,15 @@ death_file <- death_file %>%
 
 ```
 
+Create srvyr object with weights and cluster IDs for SEs 
 
 ```{r}
-## read in sryvr package 
+## create sryvr object  
 death_survey <- death_file %>%
   as_survey_design(weights = weight, ids = cluster)
 ```
 
-
-## geography 
-
-```{r}
-## death registration by district 
-death_registration_by_district <- death_survey %>% 
-  group_by(district, gender) %>% 
-  summarize(mean_death_registration = survey_mean(registered, vartype = "se"))
-
-# Create the distribution plot
-district_plot <- death_registration_by_district %>% 
-  ggplot(aes(x = mean_death_registration, color = gender, fill = gender)) + 
-  geom_density(aes(y = after_stat(count) / sum(after_stat(count))), alpha = 0.2) +  # Adjust allows for smoothing
-  cowplot::theme_cowplot() + 
-  labs(x = "Deaths Registered (%)", y = "Proportion", color = "Gender", fill = "Gender") + 
-  scale_x_continuous(labels = scales::percent_format()) +
-  ggsci::scale_fill_lancet() +
-  ggsci::scale_color_lancet() + 
-  theme(legend.position = "bottom")
-```
-
+Death registration by state 
 
 ```{r}
 # Define burnt orange color
@@ -114,7 +65,7 @@ state_plot <- death_registration_by_state_new %>%
                      xmin = mean_death_registration - 1.645 * mean_death_registration_se,
                      xmax = mean_death_registration + 1.645 * mean_death_registration_se,
                      color = gender), 
-                 size = 1,
+                 linewidth = 1,
                  position = position_dodge(0.4)) +
   geom_pointrange(aes(x = mean_death_registration, 
                       y = reorder(state, mean_death_registration),
@@ -166,6 +117,7 @@ age_plot <- ggplot(age_plot_df, aes(x = age_group, y = registered_mean, color = 
 ```
 
 ```{r}
+## Urban/Rural plot 
 urban_plot <- death_survey %>% 
   mutate(rural = case_when(
     rural == 1 ~ "rural",
@@ -187,55 +139,18 @@ urban_plot <- death_survey %>%
 ```
 
 ```{r}
-plot_left <- cowplot::plot_grid(district_plot, urban_plot, age_plot, labels = "AUTO", cols = 1) 
+plot_left <- cowplot::plot_grid(urban_plot, age_plot, labels = "AUTO", cols = 1) 
 
-full_plot <- cowplot::plot_grid(plot_left, state_plot, labels = c("", "D"), cols = 2, rel_widths = c(1.3, 1))
+full_plot <- cowplot::plot_grid(plot_left, state_plot, labels = c("", "C"), cols = 2, rel_widths = c(1.3, 1))
 
 ggsave(full_plot, filename = here("figures", "death_registration.png"), width = 14, height = 10, bg = "white")
 ```
 
 
-
-
-```{r}
-death_file %>% 
-  filter(facility_distance < 100) %>% 
-  group_by(registered) %>% 
-  summarize(mean(facility_distance))
-
-
-death_file %>% 
-  group_by(registered) %>% 
-  summarize(mean(facility_distance))
-
-death_file %>% 
-  mutate(distance = ntile(road_length_km/area_km2, n = 5)) %>% 
-  group_by(distance) %>% 
-  summarize(mean(registered))
-
-
-death_file %>% 
-  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
-  group_by(facility_distance_quantile) %>% 
-  summarize(facility_distance = mean(registered)) %>% 
-  ggplot()
-
-
-
-
-death_file %>% 
- # count(is.na(road_length_km)) 
-  mutate(distance = ntile(road_length_km, n = 5)) %>% 
-  group_by(distance) %>% 
-  summarize(mean = mean(registered))
-
-
-```
-
-
+## descriptive plots 
 
 ```{r}
-# First figure: Facility distance quantile vs mean registration likelihood
+# Facility distance quantile vs mean registration likelihood
 facility_distance_plot <- death_file %>% 
   mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
   group_by(facility_distance_quantile) %>% 
@@ -247,7 +162,7 @@ facility_distance_plot <- death_file %>%
        title = "Facility Distance") +
   theme_cowplot()
 
-# Second figure: Road length quantile vs mean registration likelihood
+# Road length quantile vs mean registration likelihood
 road_length_plot <- death_file %>% 
   mutate(road_length_quantile = ntile(road_length_km/area_km2, n = 5)) %>% 
   group_by(road_length_quantile) %>% 
@@ -259,16 +174,7 @@ road_length_plot <- death_file %>%
        title = "Road Length") +
   theme_cowplot()
 
-# Display both plots
-death_registration_distance <- plot_grid(facility_distance_plot, road_length_plot)
-
-ggsave(death_registration_distance, filename = here("figures", "death_registration_distance.png"), width = 8, height = 4, bg = "white")
-```
-
-
-
-
-```{r}
+# Death registration over time 
 death_reg_over_time <- death_file %>% 
   group_by(months_since_death) %>% 
   summarize(registered = mean(registered)) %>% 
@@ -280,8 +186,13 @@ death_reg_over_time <- death_file %>%
        y = "Deaths Registered (%)") + 
   ylim(0, 1)
 
+
+## save plots 
 ggsave(death_reg_over_time, filename = here("figures", "death_reg_over_time.png"), width = 6, height = 4, bg = "white")
 
+# Display both plots
+death_registration_distance <- plot_grid(facility_distance_plot, road_length_plot)
+ggsave(death_registration_distance, filename = here("figures", "death_registration_distance.png"), width = 8, height = 4, bg = "white")
 ```
 
 

@@ -1,0 +1,241 @@
+---
+title: "Machine learning set up"
+author: Casey Breen
+---
+
+
+Summary: Investigate h-index, partial dependence plots, etc.  
+
+
+```{r}
+## set random seed for reproducibility
+set.seed(47)  
+
+## library packages 
+library(here)
+source(here("code", "helpers.R")) ## library all packages for analysis 
+
+## read in death file 
+death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA")) %>% 
+  filter(months_since_death > 3) %>% 
+  mutate(registered = as.factor(registered))
+
+## cleam up variable 
+death_file <- death_file %>% 
+  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
+  mutate(road_length_km_quantile = ntile(road_length_km, n = 5))
+  
+death_file <- death_file %>% 
+  filter(!is.na(area_km2))
+
+## sample splits 
+death_file_split <- initial_split(death_file, 0.75)
+
+train <- training(death_file_split)
+test  <- testing(death_file_split)
+```
+
+
+
+```{r}
+## create formula 
+formula <- as.formula(paste("registered ~", paste(vars, collapse = " + ")))
+
+
+rf_model <- rand_forest(trees = 500, min_n = 5, mode = "classification") %>%
+  set_engine("ranger", importance = "permutation")
+
+# Define the recipe for data preprocessing
+rf_recipe <- recipe(formula, data = death_file) %>%
+  step_dummy(all_nominal_predictors()) %>% # Convert categorical to dummy variables
+  step_normalize(all_numeric_predictors()) # Normalize numeric predictors
+
+# Create a workflow
+rf_workflow <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+```
+
+## Fit model 
+
+```{r}
+# Train final model on the full datasetfv
+rf_final_fit <- rf_workflow %>%
+  fit(data = train)
+
+predict(rf_final_fit, new_data = test, type = "prob") %>% 
+  summarize(min(.pred_1), max(.pred_1))
+#min(.pred_1) max(.pred_1)
+# 0.04368465	0.9999692	
+
+# Extract feature importance
+model <- extract_fit_parsnip(rf_final_fit)
+
+# We need to extract only the "Yes" probabilities
+pf <- function(m, X) {
+  X_preprocessed <- bake(prep(rf_recipe), X)  # Apply the recipe to new data
+  predict(m, X_preprocessed, type = "prob")$.pred_1
+}
+
+# Test probability function with the trained model
+pred <- pf(model, test)
+
+min(pred)
+## [1] 0.5907051
+```
+
+## 
+
+
+```{r}
+y_test <- test$registered  # Extract the actual target values
+
+# Ensure y_test is a numeric or logical vector
+y_test <- as.numeric(as.character(y_test))  # Convert if it's a factor
+
+# 4 times repeated permutation importance wrt test logloss
+imp <- perm_importance(
+  model, X = test, y = y_test, v = vars, pred_fun = pf, loss = "squared_error"
+)
+
+imp
+
+# Rename the names of the first element of the list
+# Rename the row names of the first element of the list
+rownames(imp[[1]]) <- case_when(
+  rownames(imp[[1]]) == "state" ~ "State",
+  rownames(imp[[1]]) == "wealth_quintile" ~ "Wealth Quintile",
+  rownames(imp[[1]]) == "death_age" ~ "Age at Death",
+  rownames(imp[[1]]) == "native_language" ~ "Native Language",
+  rownames(imp[[1]]) == "female" ~ "Female",
+  rownames(imp[[1]]) == "road_length_km_quantile" ~ "Road Length (km)",
+  rownames(imp[[1]]) == "highest_education" ~ "Highest Education",
+  rownames(imp[[1]]) == "external_death" ~ "External Cause of Death",
+  rownames(imp[[1]]) == "internet" ~ "Internet Access", 
+  rownames(imp[[1]]) == "cycle" ~ "Bicycle Ownership",
+  rownames(imp[[1]]) == "health_insurance" ~ "Health Insurance",
+  rownames(imp[[1]]) == "rural" ~ "Rural Area",
+  rownames(imp[[1]]) == "female_head" ~ "Female Household Head",
+  rownames(imp[[1]]) == "facility_distance_quantile" ~ "Facility Distance",
+  rownames(imp[[1]]) == "own_land" ~ "Owns Land",
+  rownames(imp[[1]]) == "treatment_usual" ~ "Private / Public Treatment",
+  rownames(imp[[1]]) == "altitude_quintile" ~ "Altitude Quintile",
+  rownames(imp[[1]]) == "children_u5" ~ "Under 5 children",
+  rownames(imp[[1]]) == "caste_religion" ~ "Caste/Religion",
+    rownames(imp[[1]]) == "hh_size" ~ "Household Size",
+  TRUE ~ rownames(imp[[1]])  # Keep others unchanged
+)
+
+var_importance_plot <- plot(imp) +
+  xlab("Variable importance \n (Increase in mse, test sample)") + 
+  theme_cowplot()
+
+write_rds(var_importance_plot, here("figures", "var_importance.rds"))
+```
+
+
+```{r}
+# Friedman's H stats
+system.time( # 20 s
+  H <- hstats(model, train[vars], approx = TRUE, pred_fun = pf)
+)
+H  # xx% of prediction variability comes from interactions
+
+## gen plot 
+h_plot <- plot(H, which = 1) +
+  theme_cowplot()
+
+h_data <- tibble(var = rownames(H$h2_overall$num),
+       value = H$h2_overall$num[,1]) %>% 
+  clean_varnames(colname = var)
+
+
+interaction_plot <- h_data %>% 
+  mutate(value = value / sum(value)) %>% 
+  ggplot(aes(y = reorder(var_clean, value), x = value)) + 
+  geom_col(fill = "purple") + 
+  theme_cowplot() + 
+  labs(x = "H^2 Normalized",
+       y = "")
+
+write_rds(interaction_plot, here("figures", "interaction_plot.rds"))
+```
+
+
+## Make partial dependency plots 
+
+```{r}
+# Partial dependence of age
+partial_dep(model, v = "wealth_quintile", test, pred_fun = pf) %>% 
+  plot() 
+
+# Select only some predictors for PDPs
+selected_xvars <- c("death_age", "female", "wealth_quintile", "internet", "highest_education", "health_insurance", "facility_distance_quantile", "road_length_km_quantile", "rural", "own_land")
+
+# Generate PDPs only for selected predictors
+p <- lapply(selected_xvars, function(x) plot(partial_dep(model, v = x, X = test, pred_fun = pf)) + theme_minimal_grid(12))
+
+# Combine plots using patchwork
+partial_dependency_plots <- wrap_plots(p) &
+  ylab("Probability")
+
+ggsave(partial_dependency_plots, filename = here("figures", "partial_dependency_plot.png"), height = 10, width= 12, bg = "white") 
+```
+## partial dependency plots for interactions 
+
+```{r}
+# Stratified PDP of strongest interaction
+pd <- partial_dep(model, "death_age", BY = "wealth_quintile", X = train, by_size = 5, pred_fun = pf) 
+
+
+partial_dependency_wealth_death_age <- pd$data %>% 
+  ggplot(aes(x = death_age, y = y, color = as.character(wealth_quintile))) + 
+  geom_line(linewidth = 1) + 
+  geom_point(size = 2) + 
+  scale_color_viridis_d(option = "D") + 
+  theme_cowplot() + 
+  theme(legend.position = "bottom")  + 
+  labs(y = "Registered", x = "Death Age", color = "Wealth Quintile") 
+
+ggsave(partial_dependency_wealth_death_age, filename = here("figures", "partial_dependency_wealth_death_age.png"), height = 4, width= 6, bg = "white") 
+ggsave(h_plot, filename = here("figures", "h_plot.png"), height = 8, width= 10, bg = "white") 
+
+
+
+train <- train %>% mutate(state_gender = paste0(state, "_", female))
+pd <- partial_dep(model, "death_age", BY = "state_gender", X = train, by_size = 72, pred_fun = pf) 
+
+
+female_map <- death_file %>% 
+  group_by(state) %>% 
+  filter(n() > 1000) %>% 
+  ungroup() %>% 
+  count(female, state) %>% 
+  mutate(state_factor = str_to_title(as.character(as_factor(state))),
+         female_factor =  str_to_title(case_when(
+           female == 1 ~ "female",
+           female == 0 ~ "male"
+         ))) 
+
+state_gender_partial_dependency <- pd$data %>% 
+  separate(state_gender, into = c("state", "female")) %>% 
+  mutate(female = as.numeric(female),
+         state = as.numeric(state)) %>% 
+  left_join(female_map, by = c("female", "state")) %>% 
+  filter(!is.na(state_factor)) %>% 
+  ggplot(aes(x = death_age, y = y, color = as.character(female_factor))) + 
+  geom_line(linewidth = 1) + 
+  geom_point(size = 2) + 
+  scale_color_viridis_d(option = "D") + 
+  theme_cowplot() + 
+  theme(legend.position = "bottom")  + 
+  labs(y = "Registered", x = "Death Age", color = "Wealth Quintile") + 
+  facet_wrap(~state_factor)
+
+ggsave(state_gender_partial_dependency, filename = here("figures", "state_gender_partial_dependency.png"), height = 10, width= 12, bg = "white") 
+```
+
+
+
+
+

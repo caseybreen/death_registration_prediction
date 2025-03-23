@@ -3,22 +3,7 @@ title: "Machine learning set up"
 author: Casey Breen
 ---
 
-Other predictors: 
-
-— Presence of educated family member
-— Household size 
-— Geospatial stuff
-— Length of period between death and interview (months)
-— Caste 
-— Native language 
-— Number of children under 5
-— Marital status 
-— Mode of transport 
-— Exposure to media and literacy 
-— Household member disability 
-— District level covariates - district wealth, district mortality, education, etc. etc. 
-— Variables for health care access 
-— Digital variables - internet access, mobile phone access, etc. 
+Summary: Under vs. over 5 
 
 
 ## notes for aashish 
@@ -27,26 +12,19 @@ Other predictors:
 
 
 ```{r}
+## set random seed for reproducibility
+set.seed(47)  
+
 ## library packages 
-library(tidyverse)
-library(haven)
-library(cowplot)
 library(here)
-library(srvyr)
-library(sl3)
-library(tictoc)
-library(yardstick)
-library(tidymodels)
+source(here("code", "helpers.R")) ## library all packages for analysis 
 
 ## read in death file 
 death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA")) %>% 
   filter(months_since_death > 3) %>% 
   mutate(registered = as.factor(registered))
-```
 
-
-
-```{r}
+## cleam up variable 
 death_file <- death_file %>% 
   mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
   mutate(road_length_km_quantile = ntile(road_length_km, n = 5))
@@ -71,6 +49,8 @@ death_file_5_plus <- death_file %>%
 
 
 ```{r}
+formula <- as.formula(paste("registered ~", paste(vars, collapse = " + ")))
+
 # set up 10 fold CV
 folds_10fold_u5 <- vfold_cv(death_file_u5, 10)
 folds_10fold_5_plus <- vfold_cv(death_file_5_plus, 10)
@@ -81,14 +61,7 @@ rf_model <- rand_forest(trees = 500, min_n = 5, mode = "classification") %>%
   set_engine("ranger", importance = "permutation")
 
 # Define the recipe for data preprocessing
-rf_recipe <- recipe(registered ~ death_age + female +
-                      wealth_quintile + facility_distance_quantile + region + 
-                      road_length_km_quantile + 
-                      native_language + internet + 
-                      highest_education + health_insurance + 
-                      rural + own_land + cycle + 
-                      external_death + female_head + state + 
-                      altitude_quintile, data = death_file) %>%
+rf_recipe <- rf_recipe <- recipe(formula, data = death_file)  %>%
   step_dummy(all_nominal_predictors()) %>% # Convert categorical to dummy variables
   step_normalize(all_numeric_predictors()) # Normalize numeric predictors
 
@@ -96,7 +69,6 @@ rf_recipe <- recipe(registered ~ death_age + female +
 rf_workflow <- workflow() %>%
   add_model(rf_model) %>%
   add_recipe(rf_recipe)
-
 ```
 
 ```{r}
@@ -186,5 +158,53 @@ age_plot <- cowplot::plot_grid(confusion_matrix_plot_u5, confusion_matrix_plot_5
 
 ggsave(age_plot, filename = here("figures", "age_plot.png"), height = 4, width= 8, bg = "white") 
 ```
+
+
+
+## show random forest stuff... 
+
+
+```{r}
+# Train final model on the full dataset
+rf_final_fit_u5 <- rf_workflow %>%
+  fit(data = death_file_u5)
+
+rf_final_fit_5_plus <- rf_workflow %>%
+  fit(data = death_file_5_plus)
+
+# Extract feature importance
+final_model_u5 <- extract_fit_parsnip(rf_final_fit_u5)
+final_model_5_plus <- extract_fit_parsnip(rf_final_fit_5_plus)
+
+
+final_importance_u5 <- vip::vi(final_model_u5) %>% mutate(model = "U5")
+final_importance_5_plus <- vip::vi(final_model_5_plus) %>% mutate(model = "5_plus")
+
+
+final_importance <- final_importance_u5 %>% 
+  bind_rows(final_importance_5_plus) %>% 
+  clean_varnames(Variable)
+
+
+variable_importance_fig <- final_importance %>% 
+  mutate(model = case_when(
+    model == "U5" ~ "Under 5",
+    model == "5_plus" ~ "5+"
+  )) %>% 
+  ggplot(aes(y = reorder(var_clean, Importance), x = Importance, fill = model)) +
+  geom_col(position = position_dodge(1)) + 
+  labs(x = "MSE Difference",
+       y = "") + 
+  theme_cowplot() + 
+  theme(legend.position = "bottom")
+
+ggsave(variable_importance_fig, 
+       filename = here("figures", "variable_importance_u5_vs_5_plus.png"),
+       bg = "white",
+       width = 7, 
+       height = 7)
+```
+
+
 
 

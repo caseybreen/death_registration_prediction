@@ -1,0 +1,151 @@
+---
+title: "State importance"
+author: Casey Breen
+---
+
+
+```{r}
+## set random seed for reproducibility
+set.seed(47)  
+
+## library packages 
+library(here)
+source(here("code", "helpers.R")) ## library all packages for analysis 
+
+## read in death file 
+death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA")) %>% 
+  filter(months_since_death > 3) %>% 
+  mutate(registered = as.factor(registered))
+
+## cleam up variable 
+death_file <- death_file %>% 
+  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
+  mutate(road_length_km_quantile = ntile(road_length_km, n = 5))
+  
+death_file <- death_file %>% 
+  filter(!is.na(area_km2))
+
+
+death_file <- death_file %>% 
+  group_by(state) %>% 
+  filter(n() > 1000) %>% 
+  ungroup()
+
+vars <- vars[vars != "state"]
+```
+
+```{r}
+# Define formula
+formula <- as.formula(paste("registered ~", paste(vars, collapse = " + ")))
+
+# Define model
+rf_model <- rand_forest(trees = 500, min_n = 5, mode = "classification") %>%
+  set_engine("ranger", importance = "permutation")
+
+# Split data
+death_file_split <- initial_split(death_file, 0.75)
+train <- training(death_file_split)
+test  <- testing(death_file_split)
+
+# Ensure "state" exists in dataset
+if (!"state" %in% colnames(train) | !"state" %in% colnames(test)) {
+  stop("The dataset must contain a 'state' column for grouping.")
+}
+
+# Function to train model and compute permutation importance per state
+compute_importance_by_state <- function(state_data, state_name) {
+  
+  # Define recipe for preprocessing
+  rf_recipe <- recipe(formula, data = state_data) %>%
+    step_dummy(all_nominal_predictors()) %>% 
+    step_normalize(all_numeric_predictors())
+
+  # Create workflow
+  rf_workflow <- workflow() %>%
+    add_model(rf_model) %>%
+    add_recipe(rf_recipe)
+
+  # Train model
+  rf_fit <- rf_workflow %>% fit(data = state_data)
+
+  # Extract trained model
+  model <- extract_fit_parsnip(rf_fit)
+
+  # Define probability function
+  pf <- function(m, X) {
+    X_preprocessed <- bake(prep(rf_recipe), X)
+    predict(m, X_preprocessed, type = "prob")$.pred_1
+  }
+
+  # Get y values
+  y_test <- state_data$registered
+  y_test <- as.numeric(as.character(y_test))
+
+  # Compute permutation importance
+  imp <- perm_importance(
+    model, X = state_data, y = y_test, v = vars, pred_fun = pf, loss = "squared_error"
+  )
+
+  # Convert importance list to dataframe
+  imp_df <- data.frame(value = imp[[1]]) %>%
+    rownames_to_column(var = "Variable") %>%
+    bind_cols(data.frame(se = imp[[2]])) %>% 
+    mutate(state = state_name)
+
+  return(imp_df)
+}
+```
+
+```{r}
+# Compute permutation importance for each state separately
+test <- test %>%
+  mutate(state = as_factor(state)) 
+
+state_importance_data <- test %>%
+  group_split(state) %>%
+  set_names(unique(test$state)) %>%
+  map2_dfr(.x = ., .y = names(.), .f = compute_importance_by_state)
+
+# Rename variable names
+state_importance_data <- state_importance_data %>%
+  clean_varnames(Variable)
+
+# Normalize importance within each state and reorder variables descending
+state_importance_data_norm <- state_importance_data %>%
+  group_by(state) %>%
+  mutate(
+    value = value / max(value),
+    se = se / max(value)) %>%
+  ungroup()
+
+# Generate combined plot with facets for each state
+state_importance_plot <- ggplot(state_importance_data_norm, aes(x = value, y = reorder(var_clean, value))) +
+  geom_col(fill = "#4E84C4") +
+  geom_errorbarh(aes(xmin = value - se, xmax = value + se), height = 0.2) +
+  facet_wrap(~ state, scales = "free_y") +
+  theme_cowplot() +
+  labs(title = "Permutation Importance by State",
+       x = "Relative Importance",
+       y = "Variable") +
+  theme(axis.text.y = element_text(size = 10))
+
+
+# Generate combined plot with facets for each state
+var_importance_plot_state <- ggplot(state_importance_data_norm, aes(x = value, y = reorder(state, value))) +
+  geom_col(fill = "#4E84C4") +
+  geom_errorbarh(aes(xmin = value - se, xmax = value + se), height = 0.2) +
+  facet_wrap(~var_clean, scales = "free_y") +
+  theme_cowplot() +
+  labs(title = "Permutation Importance by State",
+       x = "Relative Importance",
+       y = "Variable") +
+  theme(axis.text.y = element_text(size = 10))
+
+
+ggsave(state_importance_plot, filename = here("figures", "var_importance_var_facet.png"), height = 20, width= 20, bg = "white") 
+ggsave(state_importance_plot, filename = here("figures", "var_importance_state_facet.png"), height = 20, width= 20, bg = "white") 
+
+
+```
+
+

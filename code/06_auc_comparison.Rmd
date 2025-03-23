@@ -1,0 +1,163 @@
+---
+title: "Compare logistic vs. random forest"
+author: Casey Breen
+---
+
+## summary 
+
+Fit logistic regression and random forest models. Compare AUC-ROC metrics. 
+
+
+```{r}
+## set random seed for reproducibility
+set.seed(47)  
+
+## library packages 
+library(here)
+source(here("code", "helpers.R")) ## library all packages for analysis 
+
+## read in death file 
+death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA")) %>% 
+  filter(months_since_death > 3) %>% 
+  mutate(registered = as.factor(registered))
+
+## cleam up variable 
+death_file <- death_file %>% 
+  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
+  mutate(road_length_km_quantile = ntile(road_length_km, n = 5))
+  
+death_file <- death_file %>% 
+  filter(!is.na(area_km2)) 
+
+death_file <- death_file %>% 
+  mutate(state_factor = as_factor(state))
+```
+
+
+
+
+```{r}
+set.seed(12)  # Setting seed for reproducibility
+
+## sample splits 
+death_file_split <- initial_split(death_file, 0.75)
+
+training_sample <- training(death_file_split)
+test_sample  <- testing(death_file_split)
+```
+
+
+
+```{r}
+## formula 
+formula <- as.formula(paste("registered ~", paste(vars, collapse = " + ")))
+
+
+log_reg_spec <- logistic_reg() %>% 
+  set_engine("glm") %>% 
+  set_mode("classification")
+
+rf_spec <- rand_forest(trees = 500, min_n = 5) %>% 
+  set_engine("ranger", probability = TRUE) %>% 
+  set_mode("classification")
+
+# Define a recipe (adjust predictors as needed)
+my_recipe <- recipe(formula, data = death_file) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_normalize(all_numeric_predictors())
+
+# Define a recipe (adjust predictors as needed)
+my_recipe_lm <- recipe(registered ~ state_factor + wealth_quintile + female + highest_education + death_age, data = death_file) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_normalize(all_numeric_predictors())
+
+# Create workflows
+log_reg_wf <- workflow() %>%
+  add_model(log_reg_spec) %>%
+  add_recipe(my_recipe)
+
+rf_wf <- workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(my_recipe)
+
+# Define cross-validation folds
+folds <- vfold_cv(death_file, v = 10)
+
+# Define metrics (including AUC-ROC)
+metrics <- metric_set(roc_auc, accuracy, sensitivity, specificity)
+
+# Fit resamples for both models
+log_reg_res <- log_reg_wf %>%
+  fit_resamples(resamples = folds, control = control_resamples(save_pred = TRUE), metrics = metrics)
+
+rf_res <- rf_wf %>%
+  fit_resamples(resamples = folds, control = control_resamples(save_pred = TRUE), metrics = metrics)
+
+# Collect metrics
+log_reg_metrics <- collect_metrics(log_reg_res)
+rf_metrics <- collect_metrics(rf_res)
+
+# Compare AUC-ROC
+print(log_reg_metrics %>% filter(.metric == "roc_auc"))
+print(rf_metrics %>% filter(.metric == "roc_auc"))
+
+```
+
+ 
+
+```{r}
+## collect predictions 
+preds_lm <- collect_predictions(log_reg_res)
+preds_rf<- collect_predictions(rf_res)
+
+## registered 
+preds_lm <- preds_lm %>% 
+  mutate(registered = factor(registered, levels = c("0", "1"))) %>% 
+  mutate(registered = relevel(as.factor(registered), ref = "1"))
+
+
+preds_rf <- preds_rf %>% 
+  mutate(registered = factor(registered, levels = c("0", "1"))) %>% 
+  mutate(registered = relevel(as.factor(registered), ref = "1"))
+
+## 
+roc_data_rf <- roc_curve(preds_rf, truth = registered, .pred_1)
+auc_val_rf <- roc_auc(preds_rf, truth = registered, .pred_1)
+
+## 
+roc_data_lm <- roc_curve(preds_lm, truth = registered, .pred_1)
+auc_val_lm <- roc_auc(preds_lm, truth = registered, .pred_1)
+
+
+# Combine the data
+roc_data_lm$model <- "Logistic Regression"
+roc_data_rf$model <- "Random Forest"
+combined_roc <- rbind(roc_data_lm, roc_data_rf)
+
+# Define a colorblind-friendly palette
+color_palette <- c("darkblue", "darkred")
+
+# Plot both curves with color-matched annotations
+roc_curve <- ggplot(combined_roc, aes(x = 1 - specificity, y = sensitivity, color = model)) +
+  geom_line(size = 1.5) +
+  geom_abline(linetype = "dashed", color = "darkgrey") +
+  scale_color_manual(values = color_palette) +  # Apply colorblind-friendly colors
+  labs(
+    title = "ROC Curve Comparison",
+    x = "1 - Specificity",
+    y = "Sensitivity",
+    color = "Model"
+  ) +
+  annotate("text", x = 0.2, y = 0.95, label = paste("Logistic Regression AUC =", round(auc_val_lm$.estimate, 2)),
+           color = color_palette[1], size = 5, hjust = 0.5) + 
+  annotate("text", x = 0.2, y = 0.9, label = paste("Random Forest AUC =", round(auc_val_rf$.estimate, 2)),
+           color = color_palette[2], size = 5, hjust = 0.5) + 
+  cowplot::theme_cowplot() +
+  theme(legend.position = "bottom")
+
+ggsave(roc_curve, filename = here("figures", "roc_curve.png"), height = 7, width= 9, bg = "white") 
+```
+
+
+
+

@@ -1,0 +1,240 @@
+---
+title: "Machine learning set up"
+author: Casey Breen
+---
+
+Other predictors: 
+
+— Presence of educated family member
+— Household size 
+— Geospatial stuff
+— Length of period between death and interview (months)
+— Caste 
+— Native language 
+— Number of children under 5
+— Marital status 
+— Mode of transport 
+— Exposure to media and literacy 
+— Household member disability 
+— District level covariates - district wealth, district mortality, education, etc. etc. 
+— Variables for health care access 
+— Digital variables - internet access, mobile phone access, etc. 
+
+
+## notes for aashish 
+
+- Missing in household and missing in 
+
+
+```{r}
+## library packages 
+library(tidyverse)
+library(haven)
+library(cowplot)
+library(here)
+library(srvyr)
+library(sl3)
+library(tictoc)
+library(yardstick)
+library(tidymodels)
+library(vip)         # for variable importance plots
+library(geofacet)
+
+
+## read in death file 
+death_file <- read_dta(here("data", "analysis_files", "nfhs5_deaths.DTA")) %>% 
+  filter(months_since_death > 3) %>% 
+  mutate(registered = as.factor(registered)) %>% 
+  group_by(state) %>%  
+  filter(n() > 1000) %>% 
+  ungroup()
+```
+
+
+```{r}
+death_file <- death_file %>% 
+  mutate(facility_distance_quantile = ntile(facility_distance, n = 5)) %>% 
+  mutate(road_length_km_quantile = ntile(road_length_km, n = 5))
+  
+death_file <- death_file %>% 
+  filter(!is.na(area_km2))
+```
+
+
+
+```{r}
+# Define the model specification
+rf_model <- rand_forest(trees = 500, min_n = 5, mode = "classification") %>%
+  set_engine("ranger", importance = "permutation")
+
+# Function to fit model for each region and extract variable importance
+fit_model_by_region <- function(state_data, state_name) {
+  
+  # Define the recipe for data preprocessing
+  rf_recipe <- recipe(registered ~ death_age + female +
+                      wealth_quintile + facility_distance_quantile  + 
+                      road_length_km_quantile + 
+                      native_language + internet + 
+                      highest_education + health_insurance + 
+                      rural + own_land + cycle + 
+                      external_death + female_head  + 
+                      altitude_quintile, data = state_data) %>%
+    step_dummy(all_nominal_predictors()) %>% 
+    step_normalize(all_numeric_predictors()) 
+
+  # Create a workflow
+  rf_workflow <- workflow() %>%
+    add_model(rf_model) %>%
+    add_recipe(rf_recipe)
+
+  # Fit the model
+  rf_fit <- rf_workflow %>%
+    fit(data = state_data %>% mutate(registered = as.factor(registered)))
+
+  # Extract variable importance
+  var_importance <- vi(rf_fit) %>%
+    mutate(state = state_name) # Add state identifier
+
+  return(list(model = rf_fit, importance = var_importance))
+}
+
+# Split training data by region
+region_training_samples <- death_file %>% group_split(state)
+state_names <- death_file %>% distinct(state) %>% pull(state)
+
+# Fit models and extract variable importance
+state_fits <- map2(region_training_samples, state_names, fit_model_by_region)
+
+# Extract variable importance from each model
+variable_importance_all <- bind_rows(map(state_fits, ~ .x$importance))
+
+# View variable importance
+library(forcats)
+
+state_importance_data <- variable_importance_all %>% 
+  mutate(Variable = case_when(
+    Variable == "state" ~ "State",
+    Variable == "region" ~ "Region",
+    Variable == "native_language" ~ "Native Language",
+    Variable == "wealth_quintile" ~ "Wealth Quintile",
+    Variable == "altitude_quintile" ~ "Altitude Quintile",
+    Variable == "death_age" ~ "Age at Death",
+    Variable == "highest_education" ~ "Highest Education",
+    Variable == "road_length_km_quantile" ~ "Road Length (km)",
+    Variable == "rural" ~ "Rural Area",
+    Variable == "facility_distance_quantile" ~ "Facility Distance",
+    Variable == "internet" ~ "Internet Access",
+    Variable == "female" ~ "Female",
+    Variable == "female_head" ~ "Female Household Head",
+    Variable == "health_insurance" ~ "Health Insurance",
+    Variable == "cycle" ~ "Bicycle Ownership",
+    Variable == "own_land" ~ "Owns Land",
+    Variable == "external_death" ~ "External Cause of Death",
+    TRUE ~ Variable  # Keep others unchanged
+  )) %>% 
+  mutate(state = as_factor(state)) %>% 
+  mutate(state = as.character(state)) %>% 
+  group_by(state) %>% 
+  mutate(Importance = Importance / max(Importance))
+
+state_importance_data %>% 
+  ggplot(aes(y = state, x = Importance)) +
+  ggsci::scale_fill_lancet() + 
+  geom_col() + 
+  theme_cowplot() + 
+  theme(legend.position = "bottom") + 
+  labs(x = "Importance",
+       y = "") + 
+  facet_wrap(~Variable)
+
+ggsave(region_importance_plot, filename = here("figures", "region_importance_plot.png"), height = 14, width= 14, bg = "white") 
+```
+
+
+
+```{r}
+state_plot <- state_importance_data %>% 
+  mutate(state = str_to_title(state)) %>% 
+  ggplot(aes(y = reorder(Variable, Importance), x = Importance)) + 
+  geom_col() + 
+  theme_cowplot() + 
+  theme(legend.position = "bottom") + 
+  labs(x = "Importance", y = "") + 
+  facet_geo(~state, grid = india_grid1)  # Use facet_geo() properly
+
+
+ggsave(state_plot, filename = here("figures", "state_plot.png"), height = 18, width= 16, bg = "white") 
+
+```
+
+
+
+## New version 
+
+
+```{r}
+# Define the model specification
+rf_model <- rand_forest(trees = 500, min_n = 5, mode = "classification") %>%
+  set_engine("ranger", importance = "permutation")
+
+# Function to fit model for each region and extract variable importance
+fit_model_by_region <- function(state_data, state_name) {
+  
+  # Define the recipe for data preprocessing
+  rf_recipe <- recipe(registered ~ death_age + female +
+                      wealth_quintile + facility_distance_quantile  + 
+                      road_length_km_quantile + 
+                      native_language + internet + 
+                      highest_education + health_insurance + 
+                      rural + own_land + cycle + 
+                      external_death + female_head  + 
+                      altitude_quintile, data = state_data) %>%
+    step_dummy(all_nominal_predictors()) %>% 
+    step_normalize(all_numeric_predictors()) 
+
+  # Create a workflow
+  rf_workflow <- workflow() %>%
+    add_model(rf_model) %>%
+    add_recipe(rf_recipe)
+
+  # Fit the model
+  rf_fit <- rf_workflow %>%
+    fit(data = state_data %>% mutate(registered = as.factor(registered)))
+
+  # Extract variable importance
+  var_importance <- vi(rf_fit) %>%
+    mutate(state = state_name) # Add state identifier
+
+  return(list(model = rf_fit, importance = var_importance))
+}
+
+imp
+
+# Rename the names of the first element of the list
+# Rename the row names of the first element of the list
+rownames(imp[[1]]) <- case_when(
+  rownames(imp[[1]]) == "state" ~ "State",
+  rownames(imp[[1]]) == "wealth_quintile" ~ "Wealth Quintile",
+  rownames(imp[[1]]) == "death_age" ~ "Age at Death",
+  rownames(imp[[1]]) == "native_language" ~ "Native Language",
+  rownames(imp[[1]]) == "female" ~ "Female",
+  rownames(imp[[1]]) == "road_length_km_quantile" ~ "Road Length (km)",
+  rownames(imp[[1]]) == "highest_education" ~ "Highest Education",
+  rownames(imp[[1]]) == "external_death" ~ "External Cause of Death",
+  rownames(imp[[1]]) == "internet" ~ "Internet Access",
+  rownames(imp[[1]]) == "cycle" ~ "Bicycle Ownership",
+  rownames(imp[[1]]) == "health_insurance" ~ "Health Insurance",
+  rownames(imp[[1]]) == "rural" ~ "Rural Area",
+  rownames(imp[[1]]) == "female_head" ~ "Female Household Head",
+  rownames(imp[[1]]) == "facility_distance_quantile" ~ "Facility Distance",
+  rownames(imp[[1]]) == "own_land" ~ "Owns Land",
+  TRUE ~ rownames(imp[[1]])  # Keep others unchanged
+)
+
+var_importance_plot <- plot(imp) +
+  xlab("Variable importance \n (Increase in mse, test sample)") + 
+  theme_cowplot()
+
+write_rds(var_importance_plot, here("figures", "var_importance.rds"))
+```
+
