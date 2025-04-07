@@ -142,10 +142,8 @@ var_importance_plot_state <- ggplot(state_importance_data_norm, aes(x = value, y
   theme(axis.text.y = element_text(size = 10))
 
 ## save figures 
-ggsave(state_importance_plot, filename = here("figures", "var_importance_var_facet.png"), height = 20, width= 20, bg = "white") 
+ggsave(var_importance_plot_state, filename = here("figures", "var_importance_var_facet.png"), height = 20, width= 20, bg = "white") 
 ggsave(state_importance_plot, filename = here("figures", "var_importance_state_facet.png"), height = 20, width= 20, bg = "white") 
-
-
 ```
 
 
